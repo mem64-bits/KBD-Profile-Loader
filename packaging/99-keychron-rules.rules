@@ -1,0 +1,2 @@
+# Keychron K2 HE Wired (PID 0x0E21) and 2.4G Dongle (PID 0xD030) Raw HID
+KERNEL=="hidraw*", ATTRS{idVendor}=="3434", MODE="0666"

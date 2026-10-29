@@ -1,0 +1,24 @@
+# Maintainer: mem64-bits
+pkgname=kbd-profile-loader
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Keychron K2 HE Native Profile Daemon"
+arch=('x86_64')
+url="https://github.com/mem64-bits/KBD-Profile-Loader"
+license=('MIT')
+depends=('hidapi' 'systemd')
+makedepends=('cmake' 'gcc')
+provides=('kbd-profile-loader')
+conflicts=('kbd-profile-loader')
+
+build() {
+    # Build directly from the parent repository directory
+    cmake -B "$srcdir/build" -S "$startdir/.." \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build "$srcdir/build" -j$(nproc)
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}

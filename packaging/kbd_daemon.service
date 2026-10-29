@@ -1,0 +1,12 @@
+[Unit]
+Description=Keychron K2 HE Native Profile Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/KBD_Profile_Loader
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

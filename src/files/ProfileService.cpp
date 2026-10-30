@@ -73,12 +73,20 @@ void ProfileService::onFileCreated(const fs::path& path) {
 }
 
 void ProfileService::onFileDeleted(const fs::path& path) {
-    KeyboardProfile dummy(path.stem().string(), path, {});
-    m_profileList.remove(dummy);
-    std::cout << "[ProfileService] Removed profile: " << path.stem().string() << '\n';
+    // Profiles are keyed by the "name" inside the JSON, which need not match the file name,
+    // so find the loaded profile that came from this file before removing it.
+    KeyboardProfile target(path.stem().string(), path, {});
+    m_profileList.forEach([&](const KeyboardProfile& p) {
+        if (p.m_filePath.filename() == path.filename()) {
+            target = p;
+        }
+    });
+
+    m_profileList.remove(target);
+    std::cout << "[ProfileService] Removed profile: " << target.m_name << '\n';
 }
 
-void ProfileService::onDeviceConnected(TransportMode mode, const std::string& path) {
+void ProfileService::onDeviceConnected(TransportMode mode, const std::string& /*path*/) {
     std::cout << "\n[Hardware Auto-Sync] Reconnected via "
             << (mode == TransportMode::Wired ? "Wired USB-C" : "2.4G Wireless Dongle")
             << ". Re-applying active profile...\nkbd> " << std::flush;
@@ -318,6 +326,18 @@ int ProfileService::queryActiveHardwareSlot() {
             default: return "Slot " + std::to_string(target + 1);
         }
     }
+
+std::optional<KeyboardProfile> ProfileService::getProfileForSlot(uint8_t slotIndex) const {
+    const uint8_t target = slotIndex % 3;
+    std::optional<KeyboardProfile> match;
+
+    m_profileList.forEach([&](const KeyboardProfile& p) {
+        if (!match && resolveTargetSlot(p) == target) {
+            match = p;
+        }
+    });
+    return match;
+}
 
 std::size_t ProfileService::profileCount() const noexcept {
     return m_profileList.size();

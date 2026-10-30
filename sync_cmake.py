@@ -15,6 +15,14 @@ SOURCE_EXTENSIONS = {".cpp", ".c", ".cc", ".cxx"}
 HEADER_EXTENSIONS = {".h", ".hpp", ".hxx"}
 ALL_EXTENSIONS = SOURCE_EXTENSIONS | HEADER_EXTENSIONS
 
+# Code that needs a window / GPU (ImGui + GLFW) or the program entry point is not
+# linked into the unit-test executable. Everything else in src/ and headers/ is.
+TEST_EXCLUDED_PREFIXES = (
+    "src/main/",
+    "src/ui/imgui/",
+    "headers/ui/imgui/",
+)
+
 
 def find_files(base_dir: Path, target_subdirs: list[str]) -> list[str]:
     """Finds all code files in specified subdirectories relative to base_dir."""
@@ -35,17 +43,21 @@ def find_files(base_dir: Path, target_subdirs: list[str]) -> list[str]:
 
 def categorize_and_format_main(files: list[str]) -> str:
     """Groups daemon files by folder category with clean CMake indentation."""
+    # Order matters: the first matching prefix wins, so the more specific
+    # folders (src/ui/imgui, src/ui, ...) must come before their parents.
     categories = [
         ("src/main", []),
         ("src/kbd", []),
         ("src/files", []),
+        ("src/ui/imgui", []),
+        ("src/ui", []),
         ("src", []),
         ("headers/dsa", []),
         ("headers/files", []),
         ("headers/kbd", []),
+        ("headers/ui/imgui", []),
+        ("headers/ui", []),
         ("headers", []),
-        ("src/ui", []),  # <--- Added
-        ("headers/ui", []),  # <--- Added
     ]
     other_files = []
 
@@ -78,8 +90,8 @@ def categorize_and_format_main(files: list[str]) -> str:
     return "\n".join(output_lines).rstrip()
 
 
-def format_test_target_sources(base_dir: Path, test_files: list[str]) -> str:
-    """Formats KBD_Unit_Tests with all test suites and their tested dependencies."""
+def format_test_target_sources(test_files: list[str], daemon_files: list[str]) -> str:
+    """Formats KBD_Unit_Tests with all test suites and the daemon code they exercise."""
     output_lines = []
 
     # 1. Test Suite Files (tests/)
@@ -88,16 +100,10 @@ def format_test_target_sources(base_dir: Path, test_files: list[str]) -> str:
         output_lines.append(f"        {f}")
     output_lines.append("")
 
-    # 2. Tested Implementations (modules tested without GUI/hardware)
-    potential_tested_sources = [
-        "src/kbd/KeychronProtocol.cpp",
-        "src/files/IniConfig.cpp",
-        "src/files/Logger.cpp",
-        "src/files/AppPaths.cpp",
-    ]
-    tested_sources = [
-        f for f in potential_tested_sources if (base_dir / f).exists()
-    ]
+    # 2. Tested Implementations (everything that does not need a window or GPU)
+    testable = [f for f in daemon_files if not f.startswith(TEST_EXCLUDED_PREFIXES)]
+    tested_sources = [f for f in testable if Path(f).suffix.lower() in SOURCE_EXTENSIONS]
+    tested_headers = [f for f in testable if Path(f).suffix.lower() in HEADER_EXTENSIONS]
 
     if tested_sources:
         output_lines.append("        # --- Tested Implementations ---")
@@ -105,24 +111,10 @@ def format_test_target_sources(base_dir: Path, test_files: list[str]) -> str:
             output_lines.append(f"        {f}")
         output_lines.append("")
 
-    # 3. Headers Required for Tests
-    potential_test_headers = [
-        "headers/dsa/Node.h",
-        "headers/dsa/List.h",
-        "headers/dsa/DLL.h",
-        "headers/files/IniConfig.h",
-        "headers/files/Logger.h",
-        "headers/files/AppPaths.h",
-        "headers/kbd/KeychronProtocol.h",
-        "headers/kbd/KbdException.h",
-    ]
-    test_headers = [
-        h for h in potential_test_headers if (base_dir / h).exists()
-    ]
-
-    if test_headers:
+    # 3. Headers of the tested code (listed so IDEs show them in the target)
+    if tested_headers:
         output_lines.append("        # --- Tested Headers ---")
-        for h in test_headers:
+        for h in tested_headers:
             output_lines.append(f"        {h}")
 
     return "\n".join(output_lines).rstrip()
@@ -184,7 +176,7 @@ def main():
     # 3. Sync KBD_Unit_Tests (GoogleTest Suite)
     test_files = find_files(project_root, ["tests"])
     print(f"[*] Discovered {len(test_files)} test suite(s) in tests/.")
-    test_block = format_test_target_sources(project_root, test_files)
+    test_block = format_test_target_sources(test_files, daemon_files)
     updated_tests = update_target_sources(cmake_file, "KBD_Unit_Tests", test_block)
 
     print(f"--------------------------------------------------------")

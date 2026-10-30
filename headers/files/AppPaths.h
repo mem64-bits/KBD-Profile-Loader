@@ -18,11 +18,17 @@ namespace Files {
         // Daemon runtime log: daemon.log
         [[nodiscard]] static fs::path getLogFilePath();
 
+        // Optional colour / size overrides for the UI: theme.json next to config.ini
+        [[nodiscard]] static fs::path getThemeFilePath();
+
         /*Windows: %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup*/
         [[nodiscard]] static fs::path getWindowsStartupDir();
 
         // Linux: ~/.config/systemd/user/
         [[nodiscard]] static fs::path getSystemdUserDir();
+
+        // Linux: ~/.config/autostart/ (XDG autostart entries, honoured by KDE, GNOME and most compositors' session managers)
+        [[nodiscard]] static fs::path getAutostartDir();
 
         // Creates required directories if they don't exist
         static void ensureDirectoriesExist();

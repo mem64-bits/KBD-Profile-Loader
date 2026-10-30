@@ -6,25 +6,37 @@
 #include "files/IniConfig.h"
 #include "files/AppPaths.h"
 #include "files/Logger.h"
-#include "ui/UIManager.h"
-#include "ui/QuickProfilePickerView.h"
+#include "ui/AppModel.h"
+#include "ui/DemoProfileGateway.h"
+#include "ui/ProfileController.h"
+#include "ui/ProfileServiceGateway.h"
+#include "ui/SystemIntegration.h"
+#include "ui/ThemeManager.h"
+#include "ui/TrayIconFactory.h"
+#include "ui/TrayPresenter.h"
+#include "ui/imgui/ActuationPanel.h"
+#include "ui/imgui/DashboardView.h"
+#include "ui/imgui/ProfilesPanel.h"
+#include "ui/imgui/SettingsPanel.h"
+#include "ui/imgui/UIManager.h"
 
 #include <iostream>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <csignal>
+#include <thread>
 
 #if defined(_WIN32)
     #include "kbd/HotkeyManager.h"
-    #include "ui/TrayManager.h"
 #else
     #include "kbd/IpcServer.h"
 #endif
 
 // Global condition variable to hold daemon execution until OS shutdown signal
-std::condition_variable g_shutdownCv;
-std::mutex              g_shutdownMutex;
-bool                    g_shouldTerminate = false;
+std::condition_variable_any g_shutdownCv;
+std::mutex                  g_shutdownMutex;
+bool                        g_shouldTerminate = false;
 
 static void triggerShutdown() {
     {
@@ -55,6 +67,24 @@ void posixSignalHandler(int sig) {
 }
 #endif
 
+static void printUsage() {
+    std::cout <<
+        "KBD_Profile_Loader - Keychron K2 HE profile daemon\n"
+        "\n"
+        "  --debug              console window + live terminal logging\n"
+        "  --silent             headless background service, file logging only\n"
+        "  --show               open the dashboard window at start-up (or in the running daemon)\n"
+        "  --demo               run the UI against a simulated keyboard (no hardware needed)\n"
+        "  --screenshot <file>  with --demo: render the dashboard to a PNG and exit\n"
+        "  --tab <name>         first tab to show: profiles, actuation or settings\n"
+#if !defined(_WIN32)
+        "\n"
+        "Commands for a running daemon (bind these to compositor / desktop shortcuts):\n"
+        "  --next  --prev  --slot1  --slot2  --slot3  --toggle  --hide\n"
+#endif
+        ;
+}
+
 int main(int argc, char* argv[]) {
     // 1. Determine default debug mode based on CMake build type
 #if defined(KBD_DEBUG_BUILD) || defined(_DEBUG) || !defined(NDEBUG)
@@ -63,6 +93,12 @@ int main(int argc, char* argv[]) {
     bool debugMode = false; // Release build: Silent background daemon, file logs only
 #endif
 
+    int         exitCode = 0;
+    bool        showWindow = false;
+    bool        demoMode = false;
+    std::string screenshotPath;
+    std::size_t firstTab = 0;
+
     // 2. Command-line argument overrides
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -70,9 +106,27 @@ int main(int argc, char* argv[]) {
             debugMode = true;
         } else if (arg == "--silent" || arg == "--headless") {
             debugMode = false;
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage();
+            return 0;
+        } else if (arg == "--demo") {
+            demoMode = true;
+        } else if (arg == "--screenshot" && i + 1 < argc) {
+            screenshotPath = argv[++i];
+            demoMode = true;
+        } else if (arg == "--tab" && i + 1 < argc) {
+            const std::string name = argv[++i];
+            firstTab = name == "actuation" ? 1 : name == "settings" ? 2 : 0;
+        } else if (arg == "--show") {
+            showWindow = true;
+#if !defined(_WIN32)
+            // A daemon that is already running opens its window; otherwise this process becomes the daemon.
+            if (kbd::IpcServer::sendCommand(arg)) return 0;
+#endif
         }
 #if !defined(_WIN32)
-        else if (arg == "--next" || arg == "--prev" || arg == "--slot1" || arg == "--slot2" || arg == "--slot3") {
+        else if (arg == "--next" || arg == "--prev" || arg == "--slot1" || arg == "--slot2" || arg == "--slot3" ||
+                 arg == "--toggle" || arg == "--hide") {
             if (kbd::IpcServer::sendCommand(arg)) return 0;
             std::cerr << "[Error] Daemon not running on /tmp/kbd_daemon.sock\n";
             return 1;
@@ -126,47 +180,103 @@ int main(int argc, char* argv[]) {
             prevResult = Files::IniConfig::parseHotkey(prevKeyStr);
         }
 
-        // 6. Connect to Hardware (USB-C Wired Priority)
-        kbd::KeyboardDevice keyboard;
-        if (!keyboard.connect()) {
-            LOG_WARN("Hardware", "Keychron K2 HE not found on startup. DeviceWatcher will probe continuously.");
+        // 6. Connect to Hardware (USB-C Wired Priority), or fake a keyboard for --demo
+        std::unique_ptr<kbd::KeyboardDevice>      keyboard;
+        std::unique_ptr<kbd::ProfileService>      profileService;
+        std::unique_ptr<Files::DirectoryWatcher>  watcher;
+        std::unique_ptr<kbd::DeviceWatcher>       deviceWatcher;
+        std::unique_ptr<ui::IProfileGateway>      gateway;
+
+        if (demoMode) {
+            LOG_INFO("Daemon", "Demo mode: using a simulated keyboard.");
+            gateway = std::make_unique<ui::DemoProfileGateway>();
         } else {
-            LOG_INFO("Hardware", "Connected to Keychron K2 HE (" + keyboard.getDevicePath() + ")");
+            keyboard = std::make_unique<kbd::KeyboardDevice>();
+            if (!keyboard->connect()) {
+                LOG_WARN("Hardware", "Keychron K2 HE not found on startup. DeviceWatcher will probe continuously.");
+            } else {
+                LOG_INFO("Hardware", "Connected to Keychron K2 HE (" + keyboard->getDevicePath() + ")");
+            }
+
+            // 7. Profile Management & File Watcher
+            profileService = std::make_unique<kbd::ProfileService>(*keyboard);
+            profileService->loadAllFromDirectory(Files::AppPaths::getProfilesDir());
+
+            watcher = std::make_unique<Files::DirectoryWatcher>(Files::AppPaths::getProfilesDir());
+            deviceWatcher = std::make_unique<kbd::DeviceWatcher>(*keyboard);
+            gateway = std::make_unique<ui::ProfileServiceGateway>(*profileService, *keyboard);
         }
 
-        // 7. Profile Management & File Watcher
-        kbd::ProfileService profileService(keyboard);
-        profileService.loadAllFromDirectory(Files::AppPaths::getProfilesDir());
+        // 8. UI: theme, state model and the controller that owns every keyboard operation.
+        //    The controller (not ProfileService) observes the watchers, so file / device events, hotkeys,
+        //    IPC commands and UI clicks are all handled in order on one background thread.
+        ui::ThemeManager& themes = ui::ThemeManager::getInstance();
+        const auto themeFile = Files::AppPaths::getThemeFilePath();
+        if (!demoMode && !std::filesystem::exists(themeFile)) {
+            themes.saveToFile(themeFile); // write the defaults once, so there is something to edit
+        }
+        if (std::filesystem::exists(themeFile)) themes.loadFromFile(themeFile);
 
-        Files::DirectoryWatcher watcher(Files::AppPaths::getProfilesDir());
-        watcher.addObserver(&profileService);
-        watcher.start();
+        ui::AppModel model;
+        ui::ProfileController controller(*gateway, model);
+        ui::SystemIntegration system;
 
-        kbd::DeviceWatcher deviceWatcher(keyboard);
-        deviceWatcher.addObserver(&profileService);
-        deviceWatcher.start();
+        if (watcher && deviceWatcher) {
+            watcher->addObserver(&controller);
+            deviceWatcher->addObserver(&controller);
+        }
+        controller.start();
+        if (watcher && deviceWatcher) {
+            watcher->start();
+            deviceWatcher->start();
+        }
 
-        // 8. Initialize Dear ImGui UI Engine
-        auto uiManager = std::make_shared<UI::UIManager>();
-        auto pickerView = std::make_shared<UI::QuickProfilePickerView>(profileService);
-        uiManager->addView(pickerView);
-        uiManager->start();
+        // 9. Dear ImGui window host (runs on this, the main, thread) + the dashboard
+        ui::UIManager* uiPointer = nullptr;
+        ui::UIManagerOptions uiOptions;
+        uiOptions.startVisible = showWindow || demoMode;
+        uiOptions.onVisibilityChanged = [&controller](const bool visible) { controller.setPollingEnabled(visible); };
+        bool screenshotSaved = false;
+        if (!screenshotPath.empty()) {
+            uiOptions.exitAfterFrames = 14; // let the layout settle before taking the picture
+            uiOptions.onFrameRendered = [&](const int frame) {
+                if (frame == uiOptions.exitAfterFrames - 1 && uiPointer != nullptr) {
+                    screenshotSaved = uiPointer->saveScreenshot(screenshotPath);
+                }
+            };
+        }
+        ui::UIManager uiManager(uiOptions);
+        uiPointer = &uiManager;
 
-        // 9. Shortcut Engine & Tray Integration
+        auto dashboard = std::make_shared<ui::DashboardView>(model);
+        dashboard->addPanel(std::make_unique<ui::ProfilesPanel>(controller, system));
+        dashboard->addPanel(std::make_unique<ui::ActuationPanel>(controller));
+        dashboard->addPanel(std::make_unique<ui::SettingsPanel>(system, themeFile));
+        dashboard->selectTab(firstTab);
+        uiManager.addView(dashboard);
+
+        // 10. Shortcut Engine & Tray Integration
+        std::unique_ptr<ui::ITrayIcon> tray = ui::createTrayIcon();
+        ui::TrayPresenter trayPresenter(model, *tray, controller, system, uiManager, [] { triggerShutdown(); });
+        bool trayRunning = false;
+        if (!demoMode) {
+            trayRunning = trayPresenter.start();
+            LOG_INFO("Tray", std::string("System tray backend: ") + std::string(tray->backendName()) +
+                             (trayRunning ? " (running)" : " (unavailable, running without a tray icon)"));
+        }
+        // Without a tray nothing could bring the window back after the user closes it.
+        uiManager.setCloseButtonQuits(!trayRunning);
+        if (!trayRunning && !demoMode) uiManager.showDashboard();
+
 #if defined(_WIN32)
-        kbd::TrayManager tray(profileService, *uiManager, [] {
-            triggerShutdown();
-        });
-        tray.start();
-
         kbd::HotkeyManager hotkeys(
             [&] {
                 LOG_INFO("Hotkey", "Action: Next Profile");
-                profileService.cycleForward();
+                controller.cycleProfile(true);
             },
             [&] {
                 LOG_INFO("Hotkey", "Action: Prev Profile");
-                profileService.cycleBackward();
+                controller.cycleProfile(false);
             },
             nextResult.binding.modifiers, nextResult.binding.vkCode,
             prevResult.binding.modifiers, prevResult.binding.vkCode
@@ -174,37 +284,59 @@ int main(int argc, char* argv[]) {
         hotkeys.start();
         LOG_INFO("Hotkey", "Hotkeys bound: " + prevKeyStr + " and " + nextKeyStr);
 #else
+        (void)nextResult; (void)prevResult; // global hotkeys are a Windows feature; Linux uses the IPC commands
         kbd::IpcServer ipcServer([&](const std::string& cmd) {
             LOG_INFO("IPC", "Received command: " + cmd);
-            if (cmd == "--next") profileService.cycleForward();
-            else if (cmd == "--prev") profileService.cycleBackward();
-            else if (cmd == "--slot1") profileService.switchHardwareSlot(0);
-            else if (cmd == "--slot2") profileService.switchHardwareSlot(1);
-            else if (cmd == "--slot3") profileService.switchHardwareSlot(2);
+            if (cmd == "--next") controller.cycleProfile(true);
+            else if (cmd == "--prev") controller.cycleProfile(false);
+            else if (cmd == "--slot1") controller.activateSlot(0);
+            else if (cmd == "--slot2") controller.activateSlot(1);
+            else if (cmd == "--slot3") controller.activateSlot(2);
+            else if (cmd == "--show") uiManager.showDashboard();
+            else if (cmd == "--hide") uiManager.hideDashboard();
+            else if (cmd == "--toggle") uiManager.toggleDashboard();
         });
-        ipcServer.start();
+        if (!demoMode) ipcServer.start();
 #endif
 
         LOG_INFO("Daemon", "Daemon successfully started. Standing by for events.");
 
-        // 10. Sleep main thread until OS shutdown signal is received
-        {
+        // 11. Run the window loop on the main thread until the OS or the tray asks us to stop. A helper
+        //     thread turns the shutdown signal into a UI quit request. Without a display the UI cannot
+        //     run, and the daemon then simply waits for the shutdown signal as it always did.
+        std::jthread shutdownWatcher([&](const std::stop_token stopToken) {
             std::unique_lock<std::mutex> lock(g_shutdownMutex);
-            g_shutdownCv.wait(lock, [] { return g_shouldTerminate; });
-        }
+            g_shutdownCv.wait(lock, stopToken, [] { return g_shouldTerminate; });
+            lock.unlock();
+            uiManager.requestQuit();
+        });
 
-        // 11. Graceful Teardown
+        if (!uiManager.run()) {
+            if (!screenshotPath.empty()) {
+                LOG_ERROR("UI", "Could not open a window to take the screenshot.");
+                exitCode = 3;
+            } else {
+                std::unique_lock<std::mutex> lock(g_shutdownMutex);
+                g_shutdownCv.wait(lock, [] { return g_shouldTerminate; });
+            }
+        } else if (!screenshotPath.empty() && !screenshotSaved) {
+            LOG_ERROR("UI", "Could not write the screenshot to " + screenshotPath);
+            exitCode = 3;
+        }
+        triggerShutdown(); // also lets the watcher thread finish when the window loop ended first
+
+        // 12. Graceful Teardown
         LOG_INFO("Daemon", "Initiating graceful teardown...");
 #if defined(_WIN32)
-        tray.stop();
         hotkeys.stop();
 #else
         ipcServer.stop();
 #endif
-        uiManager->stop();
-        deviceWatcher.stop();
-        watcher.stop();
-        keyboard.disconnect();
+        trayPresenter.stop();
+        if (deviceWatcher) deviceWatcher->stop();
+        if (watcher) watcher->stop();
+        controller.stop();
+        if (keyboard) keyboard->disconnect();
         LOG_INFO("Daemon", "Daemon terminated cleanly.");
     }
     catch (const kbd::KbdException& e) {
@@ -216,5 +348,5 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    return 0;
+    return exitCode;
 }

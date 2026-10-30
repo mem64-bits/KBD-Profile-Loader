@@ -6,8 +6,9 @@ pkgdesc="Keychron K2 HE Native Profile Daemon"
 arch=('x86_64')
 url="https://github.com/mem64-bits/KBD-Profile-Loader"
 license=('MIT')
-depends=('hidapi' 'systemd')
-makedepends=('cmake' 'gcc')
+depends=('hidapi' 'systemd' 'glib2' 'mesa')
+makedepends=('cmake' 'gcc' 'git' 'pkgconf' 'wayland-protocols' 'libxkbcommon' 'libx11' 'libxrandr' 'libxinerama' 'libxcursor' 'libxi')
+optdepends=('libdecor: window title bar on GNOME/Wayland')
 provides=('kbd-profile-loader')
 conflicts=('kbd-profile-loader')
 

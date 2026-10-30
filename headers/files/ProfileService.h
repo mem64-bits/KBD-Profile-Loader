@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -50,6 +51,9 @@ namespace kbd {
 
         int queryActiveHardwareSlot();
         [[nodiscard]] std::string getProfileNameForSlot(uint8_t slotIndex) const;
+
+        // Copy of the profile assigned to a hardware slot (0, 1, 2), or nullopt if no profile file claims it
+        [[nodiscard]] std::optional<KeyboardProfile> getProfileForSlot(uint8_t slotIndex) const;
 
         [[nodiscard]] std::size_t profileCount() const noexcept;
         [[nodiscard]] const KeyboardProfile& getCurrentProfile() const;

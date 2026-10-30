@@ -27,6 +27,10 @@ fs::path AppPaths::getLogFilePath() {
     return getAppDataDir() / "daemon.log";
 }
 
+fs::path AppPaths::getThemeFilePath() {
+    return getAppDataDir() / "theme.json";
+}
+
 fs::path AppPaths::getAppDataDir() {
 #if defined(_WIN32)
     const char* appData = std::getenv("APPDATA");
@@ -71,6 +75,18 @@ fs::path AppPaths::getSystemdUserDir() {
     const char* home = std::getenv("HOME");
     fs::path base = home ? fs::path(home) : fs::current_path();
     return base / ".config" / "systemd" / "user";
+#else
+    return {};
+#endif
+}
+
+fs::path AppPaths::getAutostartDir() {
+#if !defined(_WIN32)
+    const char* xdgConfig = std::getenv("XDG_CONFIG_HOME");
+    if (xdgConfig && *xdgConfig) return fs::path(xdgConfig) / "autostart";
+    const char* home = std::getenv("HOME");
+    fs::path base = home ? fs::path(home) : fs::current_path();
+    return base / ".config" / "autostart";
 #else
     return {};
 #endif

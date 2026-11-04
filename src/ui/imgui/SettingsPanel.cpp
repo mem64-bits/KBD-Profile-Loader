@@ -41,8 +41,8 @@ namespace {
 
 } // namespace
 
-SettingsPanel::SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile)
-    : m_system(system), m_themeFile(std::move(themeFile))
+SettingsPanel::SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace)
+    : m_system(system), m_themeFile(std::move(themeFile)), m_workspace(workspace ? std::move(workspace) : std::make_shared<Workspace>())
 {}
 
 SettingsPanel::~SettingsPanel() = default;
@@ -51,10 +51,22 @@ const char* SettingsPanel::title() const noexcept {
     return "Settings";
 }
 
+const char* SettingsPanel::subtitle() const noexcept {
+    return "Controller artwork, theme, startup and files";
+}
+
+widgets::Icon SettingsPanel::icon() const noexcept {
+    return widgets::Icon::Settings;
+}
+
 void SettingsPanel::render(const AppSnapshot& state, const Theme& theme) {
     const ThemePalette& p = theme.palette;
 
     drawThemeSection(theme);
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    drawControllerSection(state, p);
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -126,6 +138,61 @@ void SettingsPanel::drawThemeSection(const Theme& theme) {
         m_themeMessage = "Back to Black & Purple (theme.json is unchanged until you save).";
     }
     if (!m_themeMessage.empty()) mutedWrapped(p, m_themeMessage.c_str());
+}
+
+void SettingsPanel::drawControllerSection(const AppSnapshot& state, const ThemePalette& palette) {
+    widgets::sectionLabel("KEYBOARD AND CONTROLLER", palette);
+
+    {
+        const char* labels[] = {"Auto", "ANSI", "ISO"};
+        const int selected = !m_workspace->layout ? 0 : *m_workspace->layout == LayoutKind::Ansi ? 1 : 2;
+        ImGui::TextUnformatted("Keyboard drawing");
+        const int picked = widgets::segmented("##layout", labels, selected, palette);
+        if (picked == 0) m_workspace->layout.reset();
+        if (picked == 1) m_workspace->layout = LayoutKind::Ansi;
+        if (picked == 2) m_workspace->layout = LayoutKind::Iso;
+        if (selected == 0) {
+            const std::string detected = std::string("Detected: ") +
+                (state.device.connected && *variantName(state.device.variant) ? variantName(state.device.variant) : "nothing yet (ISO drawing)");
+            mutedWrapped(palette, detected.c_str());
+        }
+    }
+    ImGui::Spacing();
+    {
+        const char* labels[] = {"Xbox", "PlayStation"};
+        const int selected = m_workspace->labelStyle() == gamepad::LabelStyle::PlayStation ? 1 : 0;
+        ImGui::TextUnformatted("Controller button names");
+        const int picked = widgets::segmented("##labels", labels, selected, palette);
+        if (picked == 0) m_workspace->labels = gamepad::LabelStyle::Xbox;
+        if (picked == 1) m_workspace->labels = gamepad::LabelStyle::PlayStation;
+        mutedWrapped(palette, "The keyboard always reports an Xbox 360 controller to Windows; this only changes how "
+                              "buttons are named and drawn in this app (PlayStation also switches to a DualSense drawing).");
+    }
+    ImGui::Spacing();
+    {
+        const char* labels[] = {"Kenney", "Zacksly", "Text"};
+        const int selected = static_cast<int>(m_workspace->glyphs);
+        ImGui::TextUnformatted("Button prompts on mapped keys");
+        const int picked = widgets::segmented("##glyphs", labels, selected, palette);
+        if (picked >= 0) m_workspace->glyphs = static_cast<GlyphStyle>(picked);
+    }
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Artwork credits")) {
+        mutedWrapped(palette, "Controller drawing: the \"xbox-controller\" preset from input-overlay by Saikel Orado Liu, "
+                              "CC0 1.0 (public domain), with the Xbox logo removed.");
+        mutedWrapped(palette, "DualSense drawing (shown with PlayStation names): the \"dualsense\" preset from input-overlay "
+                              "by Caro, made from Xelu's controller prompts, CC0 1.0 (public domain), with the "
+                              "PlayStation logos removed.");
+        mutedWrapped(palette, "Button prompts: \"Input Prompts\" by Kenney (www.kenney.nl), CC0 1.0 (public domain).");
+        mutedWrapped(palette, "Xbox Series Button Icons and Controls - Zacksly. Licensed under CC BY 3.0 "
+                              "(creativecommons.org/licenses/by/3.0) - https://zacksly.itch.io");
+        mutedWrapped(palette, "PS5 Button Icons and Controls - Zacksly. Licensed under CC BY 3.0 "
+                              "(creativecommons.org/licenses/by/3.0) - https://zacksly.itch.io");
+        mutedWrapped(palette, "Both Zacksly sets are modified: the \"Buttons Full Solid\" icons were resized and packed "
+                              "into one image, and the app tints them.");
+        mutedWrapped(palette, "Xbox and PlayStation are trademarks of their owners; the names only say which buttons "
+                              "are meant.");
+    }
 }
 
 void SettingsPanel::drawSystemSection(const ThemePalette& palette) {

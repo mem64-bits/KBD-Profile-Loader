@@ -2,8 +2,10 @@
 
 #include "ui/ISystemIntegration.h"
 #include "ui/imgui/IPanel.h"
+#include "ui/imgui/Workspace.h"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 
 namespace ui {
@@ -12,7 +14,7 @@ namespace ui {
     // files, device details and an About section.
     class SettingsPanel final : public IPanel {
     public:
-        SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile);
+        SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace);
         ~SettingsPanel() override;
 
         SettingsPanel(const SettingsPanel&) = delete;
@@ -21,16 +23,20 @@ namespace ui {
         SettingsPanel& operator=(SettingsPanel&&) = delete;
 
         [[nodiscard]] const char* title() const noexcept override;
+        [[nodiscard]] const char* subtitle() const noexcept override;
+        [[nodiscard]] widgets::Icon icon() const noexcept override;
         void render(const AppSnapshot& state, const Theme& theme) override;
 
     private:
         void drawThemeSection(const Theme& theme);
+        void drawControllerSection(const AppSnapshot& state, const ThemePalette& palette);
         void drawSystemSection(const ThemePalette& palette);
         void drawDeviceSection(const AppSnapshot& state, const ThemePalette& palette);
         void drawAboutSection(const ThemePalette& palette);
 
         ISystemIntegration&   m_system;
         std::filesystem::path m_themeFile;
+        std::shared_ptr<Workspace> m_workspace;
         std::string           m_themeMessage;
         bool                  m_autostart{false};
         double                m_lastAutostartCheck{-10.0};

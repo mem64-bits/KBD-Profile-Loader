@@ -22,16 +22,48 @@ namespace test {
             record("apply:" + std::to_string(slot) + ":" + std::to_string(settings.actuationTenths) + (save ? ":save" : ""));
             lastApplied = settings;
         }
+        void applyKeyActuation(const std::uint8_t slot, std::vector<ui::KeyPosition> keys, const ui::KeyActuation& value,
+                               const bool save) override {
+            record("applyKeys:" + std::to_string(slot) + ":" + std::to_string(keys.size()) + ":" +
+                   std::to_string(value.actuationTenths) + (save ? ":save" : ""));
+            lastKeys = std::move(keys);
+            lastKeyValue = value;
+        }
         void readActuation(const std::uint8_t slot) override { record("read:" + std::to_string(slot)); }
         void flashSlot(const std::uint8_t slot) override { record("flash:" + std::to_string(slot)); }
         void refresh() override { record("refresh"); }
+        void reorderLibrary(const std::size_t fromIndex, const std::size_t toIndex) override {
+            record("reorder:" + std::to_string(fromIndex) + ":" + std::to_string(toIndex));
+        }
+        void assignProfileToSlot(const std::string& fileName, const std::uint8_t slot, const bool writeNow) override {
+            record("assign:" + fileName + ":" + std::to_string(slot) + (writeNow ? ":write" : ""));
+        }
+        void clearSlot(const std::uint8_t slot) override { record("clear:" + std::to_string(slot)); }
+        void readSlotDetails(const std::uint8_t slot) override { record("readDetails:" + std::to_string(slot)); }
+        void applyAdvancedKeys(const std::uint8_t slot, std::vector<ui::AdvancedKeyChange> changes, const bool save) override {
+            record("advanced:" + std::to_string(slot) + ":" + std::to_string(changes.size()) + (save ? ":save" : ""));
+            lastAdvanced = std::move(changes);
+        }
+        void applySocdPairs(const std::uint8_t slot, std::vector<kbd::SocdPair> pairs, const bool save) override {
+            record("socd:" + std::to_string(slot) + ":" + std::to_string(pairs.size()) + (save ? ":save" : ""));
+            lastSocd = std::move(pairs);
+        }
+        void readControllerSettings() override { record("readController"); }
+        void applyControllerMode(const std::uint8_t mode) override { record("controllerMode:" + std::to_string(mode)); }
+        void applyCurve(const kbd::ResponseCurve& curve) override { record("curve:" + std::to_string(curve[1].x)); }
+        void watchLiveTravel(std::vector<ui::KeyPosition> keys) override { record("watch:" + std::to_string(keys.size())); }
+        [[nodiscard]] std::vector<ui::LiveKeyTravel> liveTravel() const override { return {}; }
 
         [[nodiscard]] std::vector<std::string> calls() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_calls;
         }
 
-        ui::ActuationSettings lastApplied;
+        ui::ActuationSettings          lastApplied;
+        std::vector<ui::KeyPosition>   lastKeys;
+        ui::KeyActuation               lastKeyValue;
+        std::vector<ui::AdvancedKeyChange> lastAdvanced;
+        std::vector<kbd::SocdPair>     lastSocd;
 
     private:
         void record(std::string call) {

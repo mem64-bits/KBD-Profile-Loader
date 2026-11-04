@@ -208,8 +208,8 @@ namespace {
             ui::AppSnapshot state;
             state.device = {true, kbd::TransportMode::Wired, "path"};
             state.activeSlot = 1;
-            state.slots[0] = {true, "Default", "default.json", std::nullopt};
-            state.slots[1] = {true, "Tekken_8", "tekken.json", std::nullopt}; // underscore: must be escaped for dbusmenu
+            state.slots[0] = {true, "Default", "default.json", std::nullopt, std::nullopt};
+            state.slots[1] = {true, "Tekken_8", "tekken.json", std::nullopt, std::nullopt}; // underscore: must be escaped for dbusmenu
             return ui::tray::buildMenu(state, true);
         }
 

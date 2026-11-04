@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "support/TempDir.h"
 #include "ui/AppModel.h"
 #include "ui/DemoProfileGateway.h"
@@ -178,6 +180,43 @@ TEST(DemoGatewayTest, AppliedSettingsCanBeReadBackAndFlashRestoresTheProfile) {
 
     ASSERT_TRUE(gateway.flashSlotProfile(1).ok);
     EXPECT_EQ(gateway.readActuation(1, std::nullopt), (ui::ActuationSettings{true, 3, 1, 1})) << "back to the profile file's values";
+}
+
+TEST(DemoGatewayTest, HasALibraryWithThreeUnassignedProfiles) {
+    ui::DemoProfileGateway gateway(0ms);
+    const auto library = gateway.describeLibrary();
+    ASSERT_EQ(library.size(), 6u);
+    EXPECT_EQ(std::count_if(library.begin(), library.end(), [](const auto& p) { return !p.assignedSlot; }), 3);
+    EXPECT_GT(gateway.describeSlots()[1].storedKeys->overrideCount(), 0u) << "the Tekken profile has per-key settings";
+}
+
+TEST(DemoGatewayTest, KeySettingsCanBeAppliedAndReadBack) {
+    ui::DemoProfileGateway gateway(0ms);
+    const ui::KeyActuation value{ui::KeyActuation::MODE_REGULAR, 30, 0, 0};
+
+    ASSERT_TRUE(gateway.applyKeyActuation(0, {{1, 1}, {1, 2}}, value).ok);
+    const auto keys = gateway.readKeyMatrix(0);
+    ASSERT_TRUE(keys);
+    EXPECT_EQ(keys->at({1, 2}), value);
+
+    ASSERT_TRUE(gateway.flashSlotProfile(0).ok);
+    EXPECT_TRUE(gateway.readKeyMatrix(0)->at({1, 2}).followsGlobal()) << "back to the file's values";
+}
+
+TEST(DemoGatewayTest, AssigningMovesTheSlotBetweenProfiles) {
+    ui::DemoProfileGateway gateway(0ms);
+
+    ASSERT_TRUE(gateway.assignProfileToSlot("sf6.json", 1, false).ok);
+    EXPECT_EQ(gateway.describeSlots()[1].name, "Street Fighter 6");
+    const auto library = gateway.describeLibrary();
+    const auto tekken = std::find_if(library.begin(), library.end(), [](const auto& p) { return p.fileName == "tekken8.json"; });
+    ASSERT_NE(tekken, library.end());
+    EXPECT_FALSE(tekken->assignedSlot.has_value());
+
+    ASSERT_TRUE(gateway.clearSlot(1).ok);
+    EXPECT_FALSE(gateway.describeSlots()[1].hasProfile);
+    ASSERT_TRUE(gateway.reorderLibrary(4, 0).ok); // Default, Tekken, Elden Ring, Valorant, Typing, SF6 -> Typing first
+    EXPECT_EQ(gateway.describeLibrary()[0].fileName, "typing.json");
 }
 
 TEST(DemoGatewayTest, TheRealControllerDrivesItEndToEnd) {

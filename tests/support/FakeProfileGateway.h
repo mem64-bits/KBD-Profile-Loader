@@ -26,12 +26,28 @@ namespace test {
         ui::CommandResult                        saveResult{true, "Saved"};
         ui::CommandResult                        flashResult{true, "Flashed"};
         bool                                     readSupported = true;
+        ui::CommandResult                        keyApplyResult{true, "Keys applied"};
+        ui::CommandResult                        assignResult{true, "Assigned"};
+        ui::CommandResult                        clearResult{true, "Cleared"};
+        ui::CommandResult                        reorderResult{true, "Reordered"};
+        std::vector<ui::LibraryProfileInfo>      library;
+        ui::KeyMatrix                            hardwareKeys;       // what readKeyMatrix() reports
+        std::optional<ui::KeyActuation>          keyFirmwareOverride; // if set, key apply stores this instead
         std::optional<ui::ActuationSettings>     hardware;           // what readActuation() reports
         std::optional<ui::ActuationSettings>     firmwareOverride;   // if set, apply stores this instead of the request
         std::optional<ui::ActuationSettings>     lastExpected;       // `expected` argument of the latest readActuation()
         bool                                     throwOnActivate = false;
         bool                                     throwOnDescribeSlots = false;
         std::function<void()>                    onActivate;         // runs inside activateSlot (may block)
+        ui::SlotDetails                          hardwareDetails;    // what readSlotDetails() reports (and edits store into)
+        bool                                     detailsSupported = true;
+        std::optional<std::uint8_t>              keyModeOverride;    // if set, advanced-key edits store this mode instead
+        ui::CommandResult                        advancedResult{true, "Key updated"};
+        ui::CommandResult                        socdResult{true, "SOCD accepted"};
+        ui::ControllerSettings                   controller{std::uint8_t{kbd::ControllerMode::XINPUT}, kbd::DEFAULT_CURVE, std::nullopt, false};
+        std::optional<bool>                      enumerated;         // enumeratedXInput(): what the "PC" enumerated
+        bool                                     controllerSupported = true;
+        std::vector<ui::LiveKeyTravel>           liveReadings;       // readLiveTravel() answers from these
 
         FakeProfileGateway() {
             for (std::size_t i = 0; i < slots.size(); ++i) slots[i].name = ui::slotLabel(i);
@@ -116,6 +132,23 @@ namespace test {
             return readSupported ? hardware : std::nullopt;
         }
 
+        ui::CommandResult applyKeyActuation(const std::uint8_t slot, const std::vector<ui::KeyPosition>& keys,
+                                            const ui::KeyActuation& value) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("applyKeys:" + std::to_string(slot) + ":" + std::to_string(keys.size()) + ":" +
+                   std::to_string(value.mode) + ":" + std::to_string(value.actuationTenths));
+            if (keyApplyResult.ok) {
+                for (const auto& key : keys) hardwareKeys.at(key) = keyFirmwareOverride.value_or(value);
+            }
+            return keyApplyResult;
+        }
+
+        [[nodiscard]] std::optional<ui::KeyMatrix> readKeyMatrix(const std::uint8_t slot) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("readKeys:" + std::to_string(slot));
+            return readSupported ? std::optional<ui::KeyMatrix>(hardwareKeys) : std::nullopt;
+        }
+
         ui::CommandResult saveSlot(const std::uint8_t slot) override {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             record("save:" + std::to_string(slot));
@@ -146,6 +179,98 @@ namespace test {
         void handleDeviceDisconnected() override {
             std::lock_guard<std::recursive_mutex> lock(m_mutex);
             record("deviceDisconnected");
+        }
+
+        [[nodiscard]] std::vector<ui::LibraryProfileInfo> describeLibrary() const override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            return library;
+        }
+
+        ui::CommandResult reorderLibrary(const std::size_t fromIndex, const std::size_t toIndex) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("reorder:" + std::to_string(fromIndex) + ":" + std::to_string(toIndex));
+            return reorderResult;
+        }
+
+        ui::CommandResult assignProfileToSlot(const std::string& fileName, const std::uint8_t slot, const bool writeNow) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("assign:" + fileName + ":" + std::to_string(slot) + (writeNow ? ":write" : ""));
+            return assignResult;
+        }
+
+        ui::CommandResult clearSlot(const std::uint8_t slot) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("clear:" + std::to_string(slot));
+            return clearResult;
+        }
+
+        std::optional<ui::SlotDetails> readSlotDetails(const std::uint8_t slot) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("readDetails:" + std::to_string(slot));
+            if (!detailsSupported) return std::nullopt;
+            return hardwareDetails;
+        }
+
+        ui::CommandResult applyAdvancedKey(const std::uint8_t slot, const ui::AdvancedKeyChange& change) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("advanced:" + std::to_string(slot) + ":" + std::to_string(change.key.row) + "," + std::to_string(change.key.col) + ":" +
+                   std::to_string(static_cast<int>(change.kind)) + ":" + std::to_string(change.index));
+            if (!advancedResult.ok) return advancedResult;
+            ui::KeyAdvanced stored;
+            switch (change.kind) {
+                case ui::AdvancedKeyChange::Kind::Gamepad:          stored = {kbd::AdvancedMode::GAMEPAD, change.index}; break;
+                case ui::AdvancedKeyChange::Kind::Toggle:           stored = {kbd::AdvancedMode::TOGGLE, 0}; break;
+                case ui::AdvancedKeyChange::Kind::DynamicKeystroke:
+                    stored = {kbd::AdvancedMode::DKS, change.index};
+                    hardwareDetails.okmc[change.index % hardwareDetails.okmc.size()] = change.okmc;
+                    break;
+                case ui::AdvancedKeyChange::Kind::Clear:            break;
+            }
+            if (keyModeOverride) stored.mode = *keyModeOverride;
+            hardwareDetails.set(change.key, stored);
+            return advancedResult;
+        }
+
+        ui::CommandResult applySocd(const std::uint8_t slot, const std::size_t index, const kbd::SocdPair& pair) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("socd:" + std::to_string(slot) + ":" + std::to_string(index) + ":" + std::to_string(pair.type));
+            if (socdResult.ok && index < hardwareDetails.socd.size()) hardwareDetails.socd[index] = pair;
+            return socdResult;
+        }
+
+        std::optional<ui::ControllerSettings> readControllerSettings() override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("readController");
+            if (!controllerSupported) return std::nullopt;
+            return controller;
+        }
+
+        std::optional<bool> enumeratedXInput() override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            return enumerated;
+        }
+
+        ui::CommandResult applyControllerMode(const std::uint8_t mode) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("controllerMode:" + std::to_string(mode));
+            controller.mode = mode;
+            return {true, "Mode accepted"};
+        }
+
+        ui::CommandResult applyCurve(const kbd::ResponseCurve& curve) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("curve:" + std::to_string(curve[1].x) + "," + std::to_string(curve[1].y));
+            controller.curve = curve;
+            return {true, "Curve accepted"};
+        }
+
+        std::optional<ui::LiveKeyTravel> readLiveTravel(const ui::KeyPosition& key) override {
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            record("live:" + std::to_string(key.row) + "," + std::to_string(key.col));
+            for (const ui::LiveKeyTravel& reading : liveReadings) {
+                if (reading.key == key) return reading;
+            }
+            return std::nullopt;
         }
 
     private:

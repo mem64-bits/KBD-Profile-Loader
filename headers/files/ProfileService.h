@@ -35,7 +35,9 @@ namespace kbd {
         bool applyProfile(const KeyboardProfile& profile, bool flashFullMemory = false);
         bool switchHardwareSlot(uint8_t slotIndex);
 
-        // Streams 34 chunks (0x12) AND commits via AMC_SAVE_PROFILE (0x1F)
+        // Streams 34 chunks (0x12) and commits via AMC_SAVE_PROFILE (0x1F).
+        // NOTE: the firmware treats 0x12 as a read, so this does not change the stored profile. The UI writes
+        // profiles through ui::ProfileServiceGateway::flashSlotProfile, which replays the setters instead.
         bool flashProfileMemory(uint8_t slotIndex, const KeyboardProfile& profile) const;
 
         // Fast sub-millisecond tuning via AMC_SET_TRAVAL (0x14)
@@ -44,10 +46,10 @@ namespace kbd {
         // Commits custom name string directly to MCU table via AMC_SET_PROFILE_NAME (0x13)
         bool syncProfileNameToHardware(uint8_t slotIndex, const std::string& name) const;
 
-        // Add to public methods in headers/files/ProfileService.h:
-
-        // Reassigns a profile to a specific hardware slot (0, 1, 2) and saves the change to the .json file on disk
-        bool setProfileSlotAndSave(KeyboardProfile& profile, uint8_t slotIndex);
+        // Makes the file `fileName` the profile of `slotIndex` (0, 1, 2) by writing its "current" field.
+        // Any other file that claimed the slot loses its assignment, so a slot always has at most one profile.
+        // The list order is kept. False when no loaded profile comes from `fileName` or a file write failed.
+        bool assignSlot(const std::string& fileName, uint8_t slotIndex);
 
         int queryActiveHardwareSlot();
         [[nodiscard]] std::string getProfileNameForSlot(uint8_t slotIndex) const;
@@ -58,8 +60,31 @@ namespace kbd {
         [[nodiscard]] std::size_t profileCount() const noexcept;
         [[nodiscard]] const KeyboardProfile& getCurrentProfile() const;
 
+        // Visits every loaded profile in list (= cycling) order.
+        template <typename Callback>
+        void forEachProfile(Callback&& func) const {
+            m_profileList.forEach(std::forward<Callback>(func));
+        }
+
+        // Moves the profile at `fromIndex` to `toIndex` in the list (in memory only; a restart sorts by slot).
+        bool reorderProfiles(std::size_t fromIndex, std::size_t toIndex);
+
+        // Finds a profile by its file name (e.g. "HEProfile-Tekken 8-2026-10-28.json")
+        [[nodiscard]] std::optional<KeyboardProfile> findProfileByFileName(const std::string& fileName) const;
+
+        // Removes the slot assignment from every file that claims `slot`; false when none did.
+        bool unassignSlot(uint8_t slot);
+
+        // The slot a profile file is assigned to ("current", or the older "slot" key), nullopt = library only.
+        [[nodiscard]] static std::optional<uint8_t> slotOf(const KeyboardProfile& profile);
+
+        // Name to show for a file without a "name" field. Keychron Launcher exports are called
+        // "HEProfile-<name>-<yyyy-mm-dd>.json" and carry no name inside, so that part is used.
+        [[nodiscard]] static std::string displayNameFor(const fs::path& filePath);
+
     private:
-        uint8_t resolveTargetSlot(const KeyboardProfile& profile) const;
+        bool cycle(bool forward);
+        static bool writeProfileFile(const KeyboardProfile& profile);
 
         dsa::DLL<KeyboardProfile> m_profileList;
         KeyboardDevice&           m_keyboard;

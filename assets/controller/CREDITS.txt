@@ -1,0 +1,19 @@
+xbox-series-atlas.png
+
+Made from the "xbox-controller" preset of input-overlay (https://github.com/univrsal/input-overlay,
+presets/xbox-controller), which its README credits to Saikel Orado Liu
+(https://github.com/Saikel-Orado-Liu) under CC0 1.0 (https://creativecommons.org/public-domain/cc0/).
+
+Changes: repacked at half resolution into one atlas, Xbox logo removed from the Guide button.
+Xbox is a trademark of Microsoft; this drawing is not made or endorsed by Microsoft.
+
+dualsense-atlas.png
+
+Made from the "dualsense" preset of input-overlay (https://github.com/univrsal/input-overlay,
+presets/dualsense). Its CREDITS.md: original images from Xelu's free controller and key prompt pack,
+public domain under CC0 (https://thoseawesomeguys.com/prompts/); preset by Caro.
+
+Changes (tools/make_dualsense_atlas.py): PlayStation logos erased, pressed-state colour turned into a
+white tintable fill layer, body silhouette added, packed at half resolution.
+PlayStation and DualSense are trademarks of Sony Interactive Entertainment; this drawing is not made or
+endorsed by Sony.

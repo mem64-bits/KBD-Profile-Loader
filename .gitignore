@@ -64,3 +64,13 @@ CMakeUserPresets.json
 
 # Git SubModules
 /external/
+### Local reference material (never commit)
+# Keychron Launcher dump: closed source, read for protocol facts only
+keychron_launcher_dump/
+keychron_launcher_assets.zip
+# Downloaded art packs: the repo keeps only the packed atlases in assets/glyphs (with their licences)
+Xbox Series Button Icons and Controls/
+Xbox Series Button Icons and Controls.zip
+PS5 Button Icons and Controls/
+PS5 Button Icons and Controls.zip
+_to_delete/

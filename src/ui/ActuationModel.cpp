@@ -1,9 +1,25 @@
 #include "ui/ActuationModel.h"
+#include "ui/KeyboardLayout.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+
+namespace ui {
+
+std::size_t KeyMatrix::overrideCount() const noexcept {
+    std::size_t count = 0;
+    for (std::uint8_t row = 0; row < MATRIX_ROWS; ++row) {
+        for (std::uint8_t col = 0; col < MATRIX_COLS; ++col) {
+            const KeyPosition key{row, col};
+            if (!at(key).followsGlobal() && isKeyOnBoard(key)) ++count;
+        }
+    }
+    return count;
+}
+
+} // namespace ui
 
 namespace ui::actuation {
 
@@ -57,6 +73,47 @@ std::string describe(const ActuationSettings& settings) {
         text += ", Rapid Trigger off";
     }
     return text;
+}
+
+ActuationSettings effective(const ActuationSettings& global, const KeyActuation& key) noexcept {
+    ActuationSettings result = global;
+    if (key.mode != KeyActuation::MODE_FOLLOW_GLOBAL) result.rapidTrigger = key.mode == KeyActuation::MODE_RAPID;
+    if (key.actuationTenths != 0) result.actuationTenths = clampTenths(key.actuationTenths);
+    if (key.pressTenths != 0) result.pressTenths = clampTenths(key.pressTenths);
+    if (key.releaseTenths != 0) result.releaseTenths = clampTenths(key.releaseTenths);
+    return result;
+}
+
+KeyActuation overrideFrom(const ActuationSettings& settings) noexcept {
+    const ActuationSettings clean = sanitized(settings);
+    return KeyActuation{clean.rapidTrigger ? KeyActuation::MODE_RAPID : KeyActuation::MODE_REGULAR,
+                        clean.actuationTenths, clean.pressTenths, clean.releaseTenths};
+}
+
+KeyActuation sanitized(const KeyActuation& key) noexcept {
+    const auto distance = [](const std::uint8_t tenths) -> std::uint8_t { return tenths == 0 ? 0 : clampTenths(tenths); };
+    return KeyActuation{std::min<std::uint8_t>(key.mode, KeyActuation::MODE_RAPID), distance(key.actuationTenths),
+                        distance(key.pressTenths), distance(key.releaseTenths)};
+}
+
+std::string describe(const KeyActuation& key, const ActuationSettings& global) {
+    if (key.followsGlobal()) return "follows the slot (" + describe(global) + ")";
+    return describe(effective(global, key));
+}
+
+std::optional<KeyMatrix> keyMatrixFromProfile(const std::span<const std::uint8_t> profile) noexcept {
+    if (profile.size() < kbd::ProfileMemory::KEY_CONFIG_OFFSET + kbd::ProfileMemory::KEY_CONFIG_SIZE) return std::nullopt;
+
+    KeyMatrix matrix;
+    for (std::size_t row = 0; row < MATRIX_ROWS; ++row) {
+        for (std::size_t col = 0; col < MATRIX_COLS; ++col) {
+            const auto config = kbd::ProfileMemory::decodeKeyTravel(profile, row, col);
+            if (!config) return std::nullopt;
+            matrix.at({static_cast<std::uint8_t>(row), static_cast<std::uint8_t>(col)}) =
+                KeyActuation{config->mode, config->actuationTenths, config->pressSensTenths, config->releaseSensTenths};
+        }
+    }
+    return matrix;
 }
 
 std::span<const Preset> presets() noexcept {

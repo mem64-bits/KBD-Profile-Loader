@@ -6,6 +6,9 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <optional>
+#include <string_view>
+#include <utility>
 
 using namespace std::chrono_literals;
 
@@ -21,7 +24,7 @@ void ProfileService::loadProfileFromFile(const fs::path& filePath) {
     try {
         std::ifstream file(filePath);
         nlohmann::json data = nlohmann::json::parse(file);
-        std::string name = data.value("name", filePath.stem().string());
+        std::string name = data.value("name", displayNameFor(filePath));
 
         KeyboardProfile profile(name, filePath, std::move(data));
 
@@ -46,15 +49,18 @@ void ProfileService::loadAllFromDirectory(const fs::path& folder) {
             try {
                 std::ifstream file(entry.path());
                 nlohmann::json data = nlohmann::json::parse(file);
-                std::string name = data.value("name", entry.path().stem().string());
+                std::string name = data.value("name", displayNameFor(entry.path()));
                 tempProfiles.emplace_back(name, entry.path(), std::move(data));
             } catch (...) {}
         }
     }
 
-    // 1. Sort profiles strictly by hardware slot index (Slot 1 -> Slot 2 -> Slot 3)
-    std::ranges::sort(tempProfiles, [this](const KeyboardProfile& a, const KeyboardProfile& b) {
-        return resolveTargetSlot(a) < resolveTargetSlot(b);
+    // 1. Profiles assigned to a slot first (Slot 1 -> Slot 2 -> Slot 3), then the library-only ones by file name
+    std::ranges::sort(tempProfiles, [](const KeyboardProfile& a, const KeyboardProfile& b) {
+        const int slotA = slotOf(a) ? *slotOf(a) : 255;
+        const int slotB = slotOf(b) ? *slotOf(b) : 255;
+        if (slotA != slotB) return slotA < slotB;
+        return a.m_filePath.filename() < b.m_filePath.filename();
     });
 
     // 2. Add them in sorted order to the doubly linked list
@@ -62,8 +68,9 @@ void ProfileService::loadAllFromDirectory(const fs::path& folder) {
         if (m_profileList.contains(profile)) {
             m_profileList.remove(profile);
         }
-        std::cout << "[ProfileService] Loaded profile (Slot " << static_cast<int>( resolveTargetSlot(profile) ) + 1 << "): "
-                << profile.m_name << '\n';
+        const auto slot = slotOf(profile);
+        std::cout << "[ProfileService] Loaded profile (" << (slot ? "Slot " + std::to_string(*slot + 1) : std::string("library only"))
+                << "): " << profile.m_name << '\n';
         m_profileList.addLast(profile);
     }
 }
@@ -73,8 +80,7 @@ void ProfileService::onFileCreated(const fs::path& path) {
 }
 
 void ProfileService::onFileDeleted(const fs::path& path) {
-    // Profiles are keyed by the "name" inside the JSON, which need not match the file name,
-    // so find the loaded profile that came from this file before removing it.
+    // Profiles are identified by their file name; look the loaded one up first so the log shows its name.
     KeyboardProfile target(path.stem().string(), path, {});
     m_profileList.forEach([&](const KeyboardProfile& p) {
         if (p.m_filePath.filename() == path.filename()) {
@@ -86,10 +92,8 @@ void ProfileService::onFileDeleted(const fs::path& path) {
     std::cout << "[ProfileService] Removed profile: " << target.m_name << '\n';
 }
 
-void ProfileService::onDeviceConnected(TransportMode mode, const std::string& /*path*/) {
-    std::cout << "\n[Hardware Auto-Sync] Reconnected via "
-            << (mode == TransportMode::Wired ? "Wired USB-C" : "2.4G Wireless Dongle")
-            << ". Re-applying active profile...\nkbd> " << std::flush;
+void ProfileService::onDeviceConnected(TransportMode /*mode*/, const std::string& /*path*/) {
+    std::cout << "\n[Hardware Auto-Sync] Reconnected over USB-C. Re-applying active profile...\nkbd> " << std::flush;
 
     if (m_profileList.size() > 0) {
         applyProfile(m_profileList.getCurrent(), false);
@@ -97,25 +101,30 @@ void ProfileService::onDeviceConnected(TransportMode mode, const std::string& /*
 }
 
 void ProfileService::onDeviceDisconnected() {
-    std::cout << "\n[Hardware Notice] Keyboard disconnected (USB unplugged or wireless out of range).\nkbd> " << std::flush;
+    std::cout << "\n[Hardware Notice] Keyboard disconnected (USB cable unplugged).\nkbd> " << std::flush;
 }
 
 void ProfileService::cycleForward() {
-    if (m_profileList.size() == 0) {
-        std::cout << "[ProfileService] No profiles loaded.\n";
-        return;
-    }
-    const auto& profile = m_profileList.cycleNext();
-    applyProfile(profile, false);
+    cycle(true);
 }
 
 void ProfileService::cycleBackward() {
+    cycle(false);
+}
+
+// Steps through the list in its (user-defined) order, skipping library-only profiles: only a profile that
+// is assigned to one of the keyboard's slots can be switched to.
+bool ProfileService::cycle(const bool forward) {
     if (m_profileList.size() == 0) {
         std::cout << "[ProfileService] No profiles loaded.\n";
-        return;
+        return false;
     }
-    const auto& profile = m_profileList.cyclePrev();
-    applyProfile(profile, false);
+    for (std::size_t step = 0; step < m_profileList.size(); ++step) {
+        const KeyboardProfile& profile = forward ? m_profileList.cycleNext() : m_profileList.cyclePrev();
+        if (slotOf(profile)) return applyProfile(profile, false);
+    }
+    std::cout << "[ProfileService] No profile is assigned to a slot.\n";
+    return false;
 }
 
 bool ProfileService::applyProfile(const KeyboardProfile& profile, bool flashFullMemory) {
@@ -131,7 +140,12 @@ bool ProfileService::applyProfile(const KeyboardProfile& profile, bool flashFull
         }
     }
 
-    uint8_t targetSlot = resolveTargetSlot(profile);
+    const auto assigned = slotOf(profile);
+    if (!assigned) {
+        std::cerr << "[Error] '" << profile.m_name << "' is not assigned to a slot.\n";
+        return false;
+    }
+    const uint8_t targetSlot = *assigned;
 
     if (flashFullMemory) {
         if (!flashProfileMemory(targetSlot, profile)) return false;
@@ -173,11 +187,11 @@ bool ProfileService::switchHardwareSlot(uint8_t slotIndex) {
                 << (confirmedSlot == slot ? "[MATCH]" : "[MISMATCH!]") << "\n";
 
         // Sync linked list cursor to match the confirmed active hardware slot
-        m_profileList.forEach([&](const KeyboardProfile& p) {
-            if (resolveTargetSlot(p) == confirmedSlot) {
-                m_profileList.setCursorTo(p);
-            }
+        std::optional<KeyboardProfile> owner;
+        std::as_const(m_profileList).forEach([&](const KeyboardProfile& p) {
+            if (!owner && slotOf(p) == static_cast<uint8_t>(confirmedSlot)) owner = p;
         });
+        if (owner) m_profileList.setCursorTo(*owner);
     } else {
         std::cout << "[Hardware Sync] Sent 0xA9 0x11 -> Slot " << static_cast<int>( slot ) + 1 << '\n';
     }
@@ -207,9 +221,12 @@ bool ProfileService::flashProfileMemory(uint8_t slotIndex, const KeyboardProfile
         std::cout << "[Flash Engine] Sending AMC_SAVE_PROFILE (0x1F) to commit to SPI Flash...\n";
         auto savePacket = KeychronProtocol::createSaveProfilePacket(slotIndex);
         m_keyboard.sendReport(savePacket);
-        std::this_thread::sleep_for(50ms); // Hardware SPI write settling delay
 
-        std::cout << "[Flash Engine] Successfully flashed & saved Slot " << static_cast<int>( slotIndex ) + 1 << " permanently.\n";
+        // Wait for MCU to commit SPI Flash and drain the 0x1F ACK packet
+        std::vector<uint8_t> saveAck;
+        m_keyboard.readReport(saveAck, 100);
+
+        std::cout << "[Flash Engine] Successfully flashed & saved Slot " << static_cast<int>(slotIndex) + 1 << " permanently.\n";
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[Flash Engine] Flashing aborted: " << e.what() << '\n';
@@ -245,45 +262,41 @@ bool ProfileService::syncProfileNameToHardware(uint8_t slotIndex, const std::str
     return m_keyboard.sendReport(packet);
 }
 
-bool ProfileService::setProfileSlotAndSave(KeyboardProfile& profile, uint8_t slotIndex) {
-    uint8_t targetSlot = slotIndex % 3;
-
-    // 1. Update the JSON metadata
-    profile.m_configData["current"] = targetSlot;
-
-    // 2. Write the updated JSON back to disk
-    try {
-        std::ofstream file(profile.m_filePath, std::ios::trunc);
-        if (file.is_open()) {
-            file << profile.m_configData.dump(4);
-            std::cout << "[ProfileService] Updated " << profile.m_filePath.filename().string()
-                    << " -> assigned to Slot " << (int)targetSlot + 1 << " (index " << (int)targetSlot << ")\n";
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[ProfileService] Failed to write updated slot to disk: " << e.what() << '\n';
+bool ProfileService::writeProfileFile(const KeyboardProfile& profile) {
+    std::ofstream file(profile.m_filePath, std::ios::trunc);
+    if (!file.is_open()) {
+        std::cerr << "[ProfileService] Cannot write " << profile.m_filePath.string() << '\n';
         return false;
     }
+    // `replace`: a file with invalid UTF-8 in some string is still written instead of throwing.
+    file << profile.m_configData.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+    file.flush();
+    return static_cast<bool>(file);
+}
 
-    // 3. Re-sort the linked list so slot ordering remains 1 -> 2 -> 3
-    std::vector<KeyboardProfile> tempProfiles;
-    m_profileList.forEach([&](const KeyboardProfile& p) {
-        tempProfiles.push_back(p);
+bool ProfileService::assignSlot(const std::string& fileName, const uint8_t slotIndex) {
+    const uint8_t targetSlot = slotIndex % 3;
+
+    bool found = false;
+    bool ok    = true;
+    m_profileList.forEach([&](KeyboardProfile& p) {
+        const bool isTarget = p.m_filePath.filename().string() == fileName;
+        if (isTarget) {
+            found = true;
+            p.m_configData.erase("slot"); // legacy key; "current" is the one the Launcher writes
+            p.m_configData["current"] = targetSlot;
+            ok = writeProfileFile(p) && ok;
+        } else if (slotOf(p) == targetSlot) {
+            // A slot holds one profile: the file that had it goes back to the library.
+            p.m_configData.erase("current");
+            p.m_configData.erase("slot");
+            ok = writeProfileFile(p) && ok;
+        }
     });
 
-    std::sort(tempProfiles.begin(), tempProfiles.end(), [this](const KeyboardProfile& a, const KeyboardProfile& b) {
-        return resolveTargetSlot(a) < resolveTargetSlot(b);
-    });
-
-    while (m_profileList.size() > 0) {
-        m_profileList.remove(m_profileList.getCurrent());
-    }
-
-    for (auto& p : tempProfiles) {
-        m_profileList.addLast(std::move(p));
-    }
-
-    m_profileList.setCursorTo(profile);
-    return true;
+    if (!found) return false;
+    std::cout << "[ProfileService] " << fileName << " -> Slot " << static_cast<int>(targetSlot) + 1 << '\n';
+    return ok;
 }
 
 int ProfileService::queryActiveHardwareSlot() {
@@ -298,11 +311,18 @@ int ProfileService::queryActiveHardwareSlot() {
         return -1;
     }
 
+    // Other programs talking to the same raw-HID interface (Keychron Launcher, OpenRGB's Keychron support)
+    // get their replies copied to our handle as well, so only an AMC_GET_PROFILES_INFO answer counts.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
     std::vector<uint8_t> response;
-    int bytes = m_keyboard.readReport(response, 150);
-
-    if (bytes > 0 && response.size() >= 3) {
-        return static_cast<int>(response[2] % 3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int bytes = m_keyboard.readReport(response, 50);
+        if (bytes < 0) return -1;
+        if (bytes >= 3 && response[0] == KeychronProtocol::CMD_ANALOG_MATRIX &&
+            response[1] == KeychronProtocol::AMC_GET_PROFILES_INFO) {
+            return static_cast<int>(response[2] % 3);
+        }
+        if (m_keyboard.isDryRun()) break;
     }
     return -1;
 }
@@ -312,7 +332,7 @@ int ProfileService::queryActiveHardwareSlot() {
         std::string matchedName;
 
         m_profileList.forEach([&](const KeyboardProfile& p) {
-            if (resolveTargetSlot(p) == target && matchedName.empty()) {
+            if (slotOf(p) == target && matchedName.empty()) {
                 matchedName = p.m_name;
             }
         });
@@ -332,7 +352,7 @@ std::optional<KeyboardProfile> ProfileService::getProfileForSlot(uint8_t slotInd
     std::optional<KeyboardProfile> match;
 
     m_profileList.forEach([&](const KeyboardProfile& p) {
-        if (!match && resolveTargetSlot(p) == target) {
+        if (!match && slotOf(p) == target) {
             match = p;
         }
     });
@@ -347,14 +367,63 @@ const KeyboardProfile& ProfileService::getCurrentProfile() const {
     return m_profileList.getCurrent();
 }
 
-    uint8_t ProfileService::resolveTargetSlot(const KeyboardProfile& profile) const {
-        if (profile.m_configData.contains("current") && profile.m_configData["current"].is_number()) {
-            return profile.m_configData["current"].get<uint8_t>() % 3;
-        }
-        if (profile.m_configData.contains("slot") && profile.m_configData["slot"].is_number()) {
-            return profile.m_configData["slot"].get<uint8_t>() % 3;
-        }
-        return 0;
+std::string ProfileService::displayNameFor(const fs::path& filePath) {
+    std::string name = filePath.stem().string();
+
+    constexpr std::string_view LAUNCHER_PREFIX = "HEProfile-";
+    if (name.size() > LAUNCHER_PREFIX.size() && name.compare(0, LAUNCHER_PREFIX.size(), LAUNCHER_PREFIX) == 0) {
+        name.erase(0, LAUNCHER_PREFIX.size());
     }
+
+    // Trailing "-yyyy-mm-dd" (the export date)
+    const auto isDigit = [](const char c) { return c >= '0' && c <= '9'; };
+    constexpr std::size_t DATE_SUFFIX = 11; // "-2026-10-28"
+    if (name.size() > DATE_SUFFIX) {
+        const std::string_view tail(name.data() + name.size() - DATE_SUFFIX, DATE_SUFFIX);
+        const bool isDate = tail[0] == '-' && tail[5] == '-' && tail[8] == '-' &&
+                            isDigit(tail[1]) && isDigit(tail[2]) && isDigit(tail[3]) && isDigit(tail[4]) &&
+                            isDigit(tail[6]) && isDigit(tail[7]) && isDigit(tail[9]) && isDigit(tail[10]);
+        if (isDate) name.erase(name.size() - DATE_SUFFIX);
+    }
+    return name.empty() ? filePath.stem().string() : name;
+}
+
+std::optional<uint8_t> ProfileService::slotOf(const KeyboardProfile& profile) {
+    for (const char* key : {"current", "slot"}) {
+        const auto it = profile.m_configData.find(key);
+        if (it != profile.m_configData.end() && it->is_number_integer() && it->get<int>() >= 0) {
+            return static_cast<uint8_t>(it->get<int>() % 3);
+        }
+    }
+    return std::nullopt;
+}
+
+bool ProfileService::reorderProfiles(std::size_t fromIndex, std::size_t toIndex) {
+    return m_profileList.moveElement(fromIndex, toIndex);
+}
+
+std::optional<KeyboardProfile> ProfileService::findProfileByFileName(const std::string& fileName) const {
+    std::optional<KeyboardProfile> match;
+    m_profileList.forEach([&](const KeyboardProfile& p) {
+        if (!match && p.m_filePath.filename().string() == fileName) {
+            match = p;
+        }
+    });
+    return match;
+}
+
+bool ProfileService::unassignSlot(uint8_t slot) {
+    const uint8_t target = slot % 3;
+    bool changed = false;
+
+    m_profileList.forEach([&](KeyboardProfile& p) {
+        if (slotOf(p) != target) return;
+        p.m_configData.erase("current");
+        p.m_configData.erase("slot");
+        writeProfileFile(p);
+        changed = true;
+    });
+    return changed;
+}
 
 } // namespace kbd

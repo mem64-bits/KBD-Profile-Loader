@@ -17,9 +17,10 @@ struct KeyboardProfile {
           m_configData(std::move(data))
     {}
 
-    // Required by dsa::DLL for contains() and remove()
+    // Required by dsa::DLL for contains() and remove(). A profile is its file: two files may carry the same
+    // name (for example two Launcher exports of "Tekken 8" from different days) and must both stay listed.
     bool operator==(const KeyboardProfile& other) const noexcept {
-        return m_name == other.m_name;
+        return m_filePath.filename() == other.m_filePath.filename();
     }
 
     friend std::ostream& operator<<(std::ostream& os, const KeyboardProfile& profile) {

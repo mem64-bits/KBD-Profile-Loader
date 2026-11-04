@@ -3,12 +3,17 @@
 #include "ui/PngWriter.h"
 #include "ui/ThemeManager.h"
 #include "ui/TrayIconRenderer.h"
+#include "ui/imgui/ControllerArt.h"
+#include "ui/imgui/Glyphs.h"
 #include "ui/imgui/ImGuiTheme.h"
+#include "ui/imgui/SdlGamepadSource.h"
 
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_opengl.h>
 #include <imgui.h>
-#include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_impl_sdl3.h>
+#include <implot.h>
 
 #include <algorithm>
 #include <atomic>
@@ -22,9 +27,12 @@ namespace ui {
 
 namespace {
 
-    constexpr const char* APPLICATION_ID = "kbd-profile-loader";
-    constexpr double      IDLE_FRAME_SECONDS = 1.0 / 60.0;
-    constexpr double      THEME_POLL_SECONDS = 1.0;
+    constexpr const char* APPLICATION_ID     = "kbd-profile-loader";
+    constexpr const char* APPLICATION_NAME   = "Keychron K2 HE Profile Loader";
+    constexpr int         IDLE_FRAME_MS      = 16; // ~60 fps while the window is shown
+    constexpr Uint64      THEME_POLL_NS      = 1'000'000'000ULL;
+    constexpr int         MIN_WIDTH          = 920; // sidebar + a keyboard view that is still readable
+    constexpr int         MIN_HEIGHT         = 660;
 
     // The OS's own UI font reads far better than ImGui's built-in monospace one and needs no bundled
     // (and separately licensed) font file. First existing file wins.
@@ -50,32 +58,45 @@ namespace {
 #endif
     }
 
+    float contentScaleOf(SDL_Window* window) {
+        const SDL_DisplayID display = window != nullptr ? SDL_GetDisplayForWindow(window) : SDL_GetPrimaryDisplay();
+        const float scale = SDL_GetDisplayContentScale(display);
+        return scale > 0.0f ? scale : 1.0f;
+    }
+
 } // namespace
 
 struct UIManager::Impl {
-    explicit Impl(UIManagerOptions opts) : options(std::move(opts)) {}
+    explicit Impl(UIManagerOptions opts) : options(std::move(opts)), gamepads(std::make_shared<SdlGamepadSource>()) {}
 
     UIManagerOptions options;
+    std::shared_ptr<SdlGamepadSource> gamepads;
 
     std::vector<std::shared_ptr<IView>> views;
     std::mutex                          viewsMutex;
 
-    std::atomic<bool> quit{false};
-    std::atomic<bool> windowRequested{false}; // what callers want; the UI thread makes it so
-    std::atomic<bool> closeQuits{false};
-    std::atomic<bool> themeDirty{true};
-    std::atomic<bool> glfwReady{false};       // glfwPostEmptyEvent() is only valid while GLFW is initialised
+    std::atomic<bool>   quit{false};
+    std::atomic<bool>   windowRequested{false}; // what callers want; the UI thread makes it so
+    std::atomic<bool>   closeQuits{false};
+    std::atomic<bool>   themeDirty{true};
+    std::atomic<bool>   sdlReady{false};        // SDL_PushEvent is only valid while SDL is initialised
+    std::atomic<Uint32> wakeEvent{0};
 
     // Only touched on the UI thread, inside run():
-    GLFWwindow*  window{nullptr};
-    bool         windowShown{false};
-    float        dpiScale{1.0f};
-    ImFont*      builtInFont{nullptr};
-    ImFont*      customFont{nullptr};
-    std::string  loadedFontRequest{"\x01"}; // never equal to a real request, so the first applyFont() always runs
+    SDL_Window*   window{nullptr};
+    SDL_GLContext glContext{nullptr};
+    bool          windowShown{false};
+    float         dpiScale{1.0f};
+    ImFont*       builtInFont{nullptr};
+    ImFont*       customFont{nullptr};
+    std::string   loadedFontRequest{"\x01"}; // never equal to a real request, so the first applyFont() always runs
 
+    // Any thread: makes SDL_WaitEvent return so the loop looks at the flags again.
     void wake() const {
-        if (glfwReady.load(std::memory_order_acquire)) glfwPostEmptyEvent();
+        if (!sdlReady.load(std::memory_order_acquire)) return;
+        SDL_Event event{};
+        event.type = wakeEvent.load(std::memory_order_acquire);
+        if (event.type != 0) SDL_PushEvent(&event);
     }
 
     std::vector<std::shared_ptr<IView>> viewSnapshot() {
@@ -83,39 +104,48 @@ struct UIManager::Impl {
         return views;
     }
 
-    void applyVisibility(bool visible) {
+    void applyVisibility(const bool visible) {
         windowShown = visible;
         if (visible) {
-            glfwShowWindow(window);
+            SDL_ShowWindow(window);
+            SDL_RaiseWindow(window);
         } else {
-            glfwHideWindow(window);
+            SDL_HideWindow(window);
         }
+        gamepads->setActive(visible);
         for (const auto& view : viewSnapshot()) view->setVisible(visible);
         LOG_INFO("UI", visible ? "Dashboard shown." : "Dashboard hidden.");
         if (options.onVisibilityChanged) options.onVisibilityChanged(visible);
     }
 
-    void renderFrame(const int frame);
+    void handleEvent(const SDL_Event& event) {
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        gamepads->handleEvent(event);
+
+        switch (event.type) {
+            case SDL_EVENT_QUIT:
+                quit.store(true); // the OS is ending the session (signals are handled by main)
+                break;
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                if (event.window.windowID != SDL_GetWindowID(window)) break;
+                if (closeQuits.load()) {
+                    quit.store(true);
+                } else {
+                    windowRequested.store(false); // the close button hides the window, the tray keeps running
+                }
+                break;
+            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+            case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+                themeDirty.store(true);
+                break;
+            default:
+                break;
+        }
+    }
+
+    void renderFrame(int frame);
     void applyFont(const std::string& requested);
-
-    static void onGlfwError(const int code, const char* description) {
-        // Wayland has no API for some things (window icon, window position): that is expected, not an error.
-        if (code == GLFW_FEATURE_UNAVAILABLE) {
-            LOG_DEBUG("UI", std::string("GLFW: ") + description);
-        } else {
-            LOG_WARN("UI", std::string("GLFW error ") + std::to_string(code) + ": " + description);
-        }
-    }
-
-    static void onWindowClose(GLFWwindow* window) {
-        auto* self = static_cast<Impl*>(glfwGetWindowUserPointer(window));
-        if (self->closeQuits.load()) {
-            self->quit.store(true);
-            return;
-        }
-        glfwSetWindowShouldClose(window, GLFW_FALSE); // the close button hides the window, the tray keeps running
-        self->windowRequested.store(false);
-    }
+    void teardown(bool imguiReady);
 };
 
 // Picks the font the theme asks for (theme.json "fontFile"), else the system UI font, else ImGui's own.
@@ -150,7 +180,7 @@ void UIManager::Impl::applyFont(const std::string& requested) {
 void UIManager::Impl::renderFrame(const int frame) {
     int framebufferWidth = 0;
     int framebufferHeight = 0;
-    glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+    SDL_GetWindowSizeInPixels(window, &framebufferWidth, &framebufferHeight);
     glViewport(0, 0, framebufferWidth, framebufferHeight);
 
     const Color background = ThemeManager::getInstance().getTheme().palette.background;
@@ -159,7 +189,7 @@ void UIManager::Impl::renderFrame(const int frame) {
     glClear(GL_COLOR_BUFFER_BIT);
 
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
     for (const auto& view : viewSnapshot()) view->render();
@@ -168,7 +198,26 @@ void UIManager::Impl::renderFrame(const int frame) {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     if (options.onFrameRendered) options.onFrameRendered(frame);
-    glfwSwapBuffers(window);
+    SDL_GL_SwapWindow(window);
+}
+
+void UIManager::Impl::teardown(const bool imguiReady) {
+    sdlReady.store(false, std::memory_order_release);
+    gamepads->detach();
+    if (imguiReady) {
+        art::XboxControllerArt::release(); // GPU textures: before the GL context goes
+        art::DualSenseArt::release();
+        glyphs::release();
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
+    }
+    if (ImPlot::GetCurrentContext() != nullptr) ImPlot::DestroyContext();
+    if (ImGui::GetCurrentContext() != nullptr) ImGui::DestroyContext();
+    if (glContext != nullptr) SDL_GL_DestroyContext(glContext);
+    glContext = nullptr;
+    if (window != nullptr) SDL_DestroyWindow(window);
+    window = nullptr;
+    SDL_Quit();
 }
 
 UIManager::UIManager(UIManagerOptions options) : m_impl(std::make_unique<Impl>(std::move(options))) {
@@ -220,12 +269,16 @@ void UIManager::onThemeChanged(const Theme&) {
     m_impl->wake();
 }
 
+std::shared_ptr<gamepad::IGamepadSource> UIManager::gamepadSource() const {
+    return m_impl->gamepads;
+}
+
 bool UIManager::saveScreenshot(const std::filesystem::path& path) {
     if (m_impl->window == nullptr) return false;
 
     int width = 0;
     int height = 0;
-    glfwGetFramebufferSize(m_impl->window, &width, &height);
+    SDL_GetWindowSizeInPixels(m_impl->window, &width, &height);
     if (width <= 0 || height <= 0) return false;
 
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
@@ -249,83 +302,115 @@ bool UIManager::saveScreenshot(const std::filesystem::path& path) {
 bool UIManager::run() {
     Impl& s = *m_impl;
 
-    glfwSetErrorCallback(&Impl::onGlfwError);
-    if (glfwInit() != GLFW_TRUE) {
-        LOG_WARN("UI", "Could not initialise GLFW (no display?). Running without a window.");
+    // main() owns Ctrl+C / SIGTERM and the shutdown order; SDL must not turn them into its own quit events.
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    // Closing the (only) window hides it; the tray keeps the program alive.
+    SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "0");
+    // The controller view must keep updating while a game or an emulator has the focus.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_APP_ID, APPLICATION_ID); // Wayland app id / X11 class: the desktop groups the window with its icon
+    SDL_SetAppMetadata(APPLICATION_NAME, KBD_VERSION, APPLICATION_ID);
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        LOG_WARN("UI", std::string("Could not initialise SDL video (no display?): ") + SDL_GetError() + ". Running without a window.");
+        SDL_Quit();
         return false;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    glfwWindowHintString(GLFW_WAYLAND_APP_ID, APPLICATION_ID);
-    glfwWindowHintString(GLFW_X11_CLASS_NAME, APPLICATION_ID);
-    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, APPLICATION_ID);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
 
-    s.window = glfwCreateWindow(s.options.width, s.options.height, s.options.windowTitle.c_str(), nullptr, nullptr);
+    // Logical size times the display's scale, so the window has the same proportions on a 150 % display.
+    const float startScale = contentScaleOf(nullptr);
+    const SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    s.window = SDL_CreateWindow(s.options.windowTitle.c_str(), static_cast<int>(static_cast<float>(s.options.width) * startScale),
+                                static_cast<int>(static_cast<float>(s.options.height) * startScale), flags);
     if (s.window == nullptr) {
-        LOG_WARN("UI", "Could not create an OpenGL window. Running without a window.");
-        glfwTerminate();
+        LOG_WARN("UI", std::string("Could not create an OpenGL window: ") + SDL_GetError() + ". Running without a window.");
+        s.teardown(false);
         return false;
     }
-
-    glfwSetWindowUserPointer(s.window, &s);
-    glfwSetWindowCloseCallback(s.window, &Impl::onWindowClose);
-    glfwSetWindowSizeLimits(s.window, 420, 520, GLFW_DONT_CARE, GLFW_DONT_CARE);
+    SDL_SetWindowMinimumSize(s.window, static_cast<int>(MIN_WIDTH * startScale), static_cast<int>(MIN_HEIGHT * startScale));
+    // Previews (screenshots, smoke tests) go to the corner, away from wherever the pointer rests.
+    if (s.options.exitAfterFrames > 0) {
+        SDL_SetWindowPosition(s.window, 0, 0);
+    } else {
+        SDL_SetWindowPosition(s.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
 
     // Window icon: the same procedurally drawn icon as the tray (ignored where the platform has no icons).
     {
-        const TrayImage icon = renderTrayIcon(64, ThemeManager::getInstance().getTheme(), 1, true);
-        GLFWimage image{icon.width, icon.height, const_cast<unsigned char*>(icon.rgba.data())};
-        glfwSetWindowIcon(s.window, 1, &image);
+        TrayImage icon = renderTrayIcon(64, ThemeManager::getInstance().getTheme(), 1, true);
+        if (SDL_Surface* surface = SDL_CreateSurfaceFrom(icon.width, icon.height, SDL_PIXELFORMAT_RGBA32, icon.rgba.data(), icon.width * 4)) {
+            SDL_SetWindowIcon(s.window, surface); // SDL keeps its own copy
+            SDL_DestroySurface(surface);
+        }
     }
 
-    glfwMakeContextCurrent(s.window);
-    glfwSwapInterval(1);
+    s.glContext = SDL_GL_CreateContext(s.window);
+    if (s.glContext == nullptr) {
+        LOG_WARN("UI", std::string("Could not create an OpenGL 3.0 context: ") + SDL_GetError() + ". Running without a window.");
+        s.teardown(false);
+        return false;
+    }
+    SDL_GL_MakeCurrent(s.window, s.glContext);
+    SDL_GL_SetSwapInterval(1);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImPlot::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; // a tray daemon must not scatter imgui.ini files around
     io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // not the gamepad: the keyboard IS the gamepad here
     s.builtInFont = io.Fonts->AddFontDefaultVector();
 
-    if (!ImGui_ImplGlfw_InitForOpenGL(s.window, true) || !ImGui_ImplOpenGL3_Init("#version 130")) {
+    if (!ImGui_ImplSDL3_InitForOpenGL(s.window, s.glContext) || !ImGui_ImplOpenGL3_Init("#version 130")) {
         LOG_WARN("UI", "Could not initialise the ImGui backends. Running without a window.");
-        ImGui::DestroyContext();
-        glfwDestroyWindow(s.window);
-        s.window = nullptr;
-        glfwTerminate();
+        s.teardown(false);
         return false;
     }
+    // ImGui must not open controllers of its own (that is SdlGamepadSource's job).
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
 
     ThemeManager::getInstance().addObserver(this);
-    s.glfwReady.store(true, std::memory_order_release);
-    LOG_INFO("UI", std::string("Window ready (") + (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ? "Wayland" : glfwGetPlatform() == GLFW_PLATFORM_X11 ? "X11" : "native") + " backend).");
+    s.wakeEvent.store(SDL_RegisterEvents(1), std::memory_order_release);
+    s.sdlReady.store(true, std::memory_order_release);
+    s.gamepads->attach();
+    const char* driver = SDL_GetCurrentVideoDriver();
+    LOG_INFO("UI", std::string("Window ready (SDL ") + std::to_string(SDL_VERSIONNUM_MAJOR(SDL_GetVersion())) + "." +
+                       std::to_string(SDL_VERSIONNUM_MINOR(SDL_GetVersion())) + "." + std::to_string(SDL_VERSIONNUM_MICRO(SDL_GetVersion())) +
+                       ", " + (driver != nullptr ? driver : "unknown") + " video driver).");
 
     int    frame = 0;
-    double lastThemePoll = glfwGetTime();
+    Uint64 lastThemePoll = SDL_GetTicksNS();
 
     while (!s.quit.load()) {
         const bool wanted = s.windowRequested.load();
         if (wanted != s.windowShown) s.applyVisibility(wanted);
 
-        if (s.windowShown) {
-            glfwWaitEventsTimeout(IDLE_FRAME_SECONDS);
-        } else {
-            glfwWaitEvents(); // hidden: sleep until a tray click, theme change or quit request wakes us
+        SDL_Event event;
+        // Shown: wake up at least once a frame (animations, live data). Hidden: sleep until a tray click,
+        // a theme change or a quit request pushes an event.
+        const bool gotEvent = s.windowShown ? SDL_WaitEventTimeout(&event, IDLE_FRAME_MS) : SDL_WaitEvent(&event);
+        if (gotEvent) {
+            s.handleEvent(event);
+            while (SDL_PollEvent(&event)) s.handleEvent(event);
         }
         if (s.quit.load()) break;
 
-        const double now = glfwGetTime();
-        if (s.windowShown && now - lastThemePoll >= THEME_POLL_SECONDS) {
+        const Uint64 now = SDL_GetTicksNS();
+        if (s.windowShown && now - lastThemePoll >= THEME_POLL_NS) {
             lastThemePoll = now;
             ThemeManager::getInstance().reloadIfChanged(); // hot-reload theme.json edits
         }
 
-        const float scale = ImGui_ImplGlfw_GetContentScaleForWindow(s.window);
-        if (scale > 0.0f && scale != s.dpiScale) {
+        const float scale = contentScaleOf(s.window);
+        if (scale != s.dpiScale) {
             s.dpiScale = scale;
             s.themeDirty.store(true);
         }
@@ -335,22 +420,15 @@ bool UIManager::run() {
             applyImGuiTheme(theme, s.dpiScale);
         }
 
-        if (!s.windowShown || glfwGetWindowAttrib(s.window, GLFW_ICONIFIED) == GLFW_TRUE) continue;
+        if (!s.windowShown || (SDL_GetWindowFlags(s.window) & SDL_WINDOW_MINIMIZED) != 0) continue;
 
         s.renderFrame(frame);
         ++frame;
         if (s.options.exitAfterFrames > 0 && frame >= s.options.exitAfterFrames) s.quit.store(true);
     }
 
-    s.glfwReady.store(false, std::memory_order_release);
     ThemeManager::getInstance().removeObserver(this);
-
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    glfwDestroyWindow(s.window);
-    s.window = nullptr;
-    glfwTerminate();
+    s.teardown(true);
     return true;
 }
 

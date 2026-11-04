@@ -102,3 +102,76 @@ TEST(ProfileMemoryTest, OnlyModeTwoIsRapidTrigger) {
     EXPECT_FALSE((kbd::GlobalTravelConfig{1}).isRapidTrigger());
     EXPECT_TRUE((kbd::GlobalTravelConfig{2}).isRapidTrigger());
 }
+
+// ---------------------------------------------------------------------------
+// Whole profile: per-key entries and the firmware's "0 = use the global value" rule
+// ---------------------------------------------------------------------------
+
+TEST(ProfileMemoryTest, LayoutMatchesTheFirmwareStruct) {
+    EXPECT_EQ(kbd::ProfileMemory::KEY_CONFIG_OFFSET, 4u);
+    EXPECT_EQ(kbd::ProfileMemory::OKMC_OFFSET, 388u);
+    EXPECT_EQ(kbd::ProfileMemory::SOCD_OFFSET, 768u);
+    EXPECT_EQ(kbd::ProfileMemory::NAME_OFFSET, 828u);
+    EXPECT_EQ(kbd::ProfileMemory::CRC_OFFSET, 858u);
+    EXPECT_EQ(kbd::ProfileMemory::PROFILE_SIZE, 860u);
+    EXPECT_EQ(kbd::ProfileMemory::keyConfigOffset(0, 0), 4u);
+    EXPECT_EQ(kbd::ProfileMemory::keyConfigOffset(5, 15), 4u + 95u * 4u);
+}
+
+TEST(ProfileMemoryTest, KeyEntriesRoundTripAtTheirOwnOffset) {
+    std::vector<std::uint8_t> profile(kbd::ProfileMemory::PROFILE_SIZE, 0);
+    const kbd::KeyTravelConfig w{2, 3, 1, 2, 0, 0};
+
+    ASSERT_TRUE(kbd::ProfileMemory::encodeKeyTravel(profile, 2, 2, w));
+    EXPECT_EQ(kbd::ProfileMemory::decodeKeyTravel(profile, 2, 2), w);
+
+    // Only the four bytes of that key changed.
+    for (std::size_t i = 0; i < profile.size(); ++i) {
+        const bool inKey = i >= 140 && i < 144;
+        if (!inKey) {
+            EXPECT_EQ(profile[i], 0) << i;
+        }
+    }
+}
+
+TEST(ProfileMemoryTest, KeyAccessOutsideTheMatrixOrDumpFails) {
+    std::vector<std::uint8_t> profile(kbd::ProfileMemory::PROFILE_SIZE, 0);
+    EXPECT_FALSE(kbd::ProfileMemory::decodeKeyTravel(profile, 6, 0).has_value());
+    EXPECT_FALSE(kbd::ProfileMemory::decodeKeyTravel(profile, 0, 16).has_value());
+    EXPECT_FALSE(kbd::ProfileMemory::encodeKeyTravel(profile, 6, 0, {}));
+
+    std::vector<std::uint8_t> shortDump(100, 0);
+    EXPECT_FALSE(kbd::ProfileMemory::decodeKeyTravel(shortDump, 5, 15).has_value());
+}
+
+TEST(ProfileMemoryTest, ZeroKeyFieldsTakeTheGlobalValue) {
+    const kbd::GlobalTravelConfig global{2, 10, 3, 0, 0, 0}; // release 0 = same as press
+
+    const auto followAll = kbd::ProfileMemory::resolveKeyTravel(global, kbd::KeyTravelConfig{0, 0, 0, 0, 0, 0});
+    EXPECT_EQ(followAll.mode, 2);
+    EXPECT_EQ(followAll.actuationTenths, 10);
+    EXPECT_EQ(followAll.pressSensTenths, 3);
+    EXPECT_EQ(followAll.releaseSensTenths, 3);
+
+    const auto ownActuationOnly = kbd::ProfileMemory::resolveKeyTravel(global, kbd::KeyTravelConfig{0, 2, 0, 0, 0, 0});
+    EXPECT_EQ(ownActuationOnly.mode, 2);
+    EXPECT_EQ(ownActuationOnly.actuationTenths, 2);
+
+    const auto own = kbd::ProfileMemory::resolveKeyTravel(global, kbd::KeyTravelConfig{1, 25, 4, 5, 0, 0});
+    EXPECT_EQ(own, (kbd::KeyTravelConfig{1, 25, 4, 5, 0, 0}));
+}
+
+TEST(ProfileMemoryTest, SocdPairsPackRowAndColumnIntoOneByte) {
+    std::vector<std::uint8_t> profile(kbd::ProfileMemory::PROFILE_SIZE, 0);
+    const kbd::SocdPair pair{5, 6, 3, 2, 6}; // Space / S, neutral
+
+    ASSERT_TRUE(kbd::ProfileMemory::encodeSocd(profile, 2, pair));
+    const std::size_t at = kbd::ProfileMemory::SOCD_OFFSET + 2 * 3;
+    EXPECT_EQ(profile[at], 5 | (6 << 3));     // row in bits 0-2, column in bits 3-7 (socd_config_t)
+    EXPECT_EQ(profile[at + 1], 3 | (2 << 3));
+    EXPECT_EQ(profile[at + 2], 6);
+    EXPECT_EQ(kbd::ProfileMemory::decodeSocd(profile, 2), pair);
+
+    EXPECT_FALSE(kbd::ProfileMemory::decodeSocd(profile, 20).has_value());
+    EXPECT_FALSE(kbd::ProfileMemory::encodeSocd(profile, 20, pair));
+}

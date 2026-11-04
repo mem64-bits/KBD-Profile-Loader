@@ -9,10 +9,20 @@
 namespace kbd {
 
 constexpr uint16_t KEYCHRON_VID   = 0x3434;
-constexpr uint16_t PID_K2_HE_WIRE = 0x0E21; // Direct USB-C Wired
-constexpr uint16_t PID_K2_HE_DONG = 0xD030; // 2.4 GHz Wireless Dongle
-constexpr uint16_t QMK_USAGE_PAGE = 0xFF60;
+constexpr uint16_t QMK_USAGE_PAGE = 0xFF60; // raw HID (VIA / Keychron configuration) interface
 constexpr uint16_t QMK_USAGE      = 0x61;
+
+// The wired K2 HE, one product id per layout (keyboards/keychron/k2_he/{ansi,iso,jis}/keyboard.json). The
+// configuration interface only exists over the cable, so these are the only devices the app opens.
+struct WiredModel {
+    uint16_t        productId;
+    KeyboardVariant variant;
+};
+constexpr WiredModel WIRED_MODELS[] = {
+    {0x0E20, KeyboardVariant::Ansi},
+    {0x0E21, KeyboardVariant::Iso},
+    {0x0E22, KeyboardVariant::Jis},
+};
 
 // 1. Constructor
 KeyboardDevice::KeyboardDevice() {
@@ -30,6 +40,7 @@ KeyboardDevice::KeyboardDevice(KeyboardDevice&& other) noexcept {
     std::lock_guard<std::mutex> lock(other.m_ioMutex);
     m_handle       = other.m_handle;
     m_devicePath   = std::move(other.m_devicePath);
+    m_productId    = other.m_productId;
     m_isConnected  = other.m_isConnected;
     m_dryRun       = other.m_dryRun;
     m_dumpFilePath = std::move(other.m_dumpFilePath);
@@ -47,6 +58,7 @@ KeyboardDevice& KeyboardDevice::operator=(KeyboardDevice&& other) noexcept {
         }
         m_handle       = other.m_handle;
         m_devicePath   = std::move(other.m_devicePath);
+        m_productId    = other.m_productId;
         m_isConnected  = other.m_isConnected;
         m_dryRun       = other.m_dryRun;
         m_dumpFilePath = std::move(other.m_dumpFilePath);
@@ -82,97 +94,131 @@ std::string KeyboardDevice::getDevicePath() const {
     return m_devicePath;
 }
 
+uint16_t KeyboardDevice::productId() const noexcept {
+    std::lock_guard<std::mutex> lock(m_ioMutex);
+    return m_productId;
+}
+
+KeyboardVariant KeyboardDevice::variant() const noexcept {
+    return variantForProductId(productId());
+}
+
+KeyboardVariant KeyboardDevice::variantForProductId(const uint16_t productId) noexcept {
+    for (const WiredModel& model : WIRED_MODELS) {
+        if (model.productId == productId) return model.variant;
+    }
+    return KeyboardVariant::Unknown;
+}
+
 // 5. Endpoint Discovery & Active Probing
 std::vector<KeyboardDevice::CandidateEndpoint> KeyboardDevice::findAllCandidates() {
     std::vector<CandidateEndpoint> candidates;
-    struct hid_device_info* devs = hid_enumerate(KEYCHRON_VID, 0x0);
-    struct hid_device_info* curr = devs;
-
-    while (curr != nullptr) {
-        if (curr->usage_page == QMK_USAGE_PAGE && curr->usage == QMK_USAGE) {
-            candidates.push_back({
-                curr->path ? std::string(curr->path) : "",
-                curr->product_id,
-                curr->interface_number
-            });
+    for (const WiredModel& model : WIRED_MODELS) {
+        hid_device_info* devices = hid_enumerate(KEYCHRON_VID, model.productId);
+        for (const hid_device_info* current = devices; current != nullptr; current = current->next) {
+            if (current->usage_page != QMK_USAGE_PAGE || current->usage != QMK_USAGE || current->path == nullptr) continue;
+            candidates.push_back({std::string(current->path), current->product_id, current->interface_number});
         }
-        curr = curr->next;
+        hid_free_enumeration(devices);
     }
-
-    hid_free_enumeration(devs);
-
-    // Prioritize direct wired connection (PID 0x0E21) over dongle (PID 0xD030)
-    std::sort(candidates.begin(), candidates.end(), [](const CandidateEndpoint& a, const CandidateEndpoint& b) {
-        if (a.productId == PID_K2_HE_WIRE && b.productId != PID_K2_HE_WIRE) return true;
-        if (a.productId != PID_K2_HE_WIRE && b.productId == PID_K2_HE_WIRE) return false;
-        return a.interfaceNumber < b.interfaceNumber;
-    });
-
     return candidates;
 }
 
 bool KeyboardDevice::probeEndpoint(hid_device* handle) {
     if (!handle) return false;
 
-    // Send 33-byte Status Query packet (0xA9 0x10)
+    // AMC_GET_PROFILES_INFO (0xA9 0x10): every K2 HE firmware answers it.
     uint8_t probePacket[33] = {0x00};
-    probePacket[1] = 0xA9; // Vendor Opcode
-    probePacket[2] = 0x10; // Status Query
+    probePacket[1] = 0xA9;
+    probePacket[2] = 0x10;
+    if (hid_write(handle, probePacket, sizeof(probePacket)) < 0) return false;
 
-    int written = hid_write(handle, probePacket, sizeof(probePacket));
-    if (written < 0) return false;
+    // Up to ~100 ms for the answer; replies meant for other programs on the same interface are skipped.
+    uint8_t reply[32] = {0x00};
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        const int bytesRead = hid_read_timeout(handle, reply, sizeof(reply), 20);
+        if (bytesRead < 0) return false;
+        if (bytesRead >= 2 && reply[0] == 0xA9 && reply[1] == 0x10) return true;
+    }
+    return false;
+}
 
-    // Wait up to 40ms for the keyboard MCU to respond
-    uint8_t readBuffer[32] = {0x00};
-    int bytesRead = hid_read_timeout(handle, readBuffer, sizeof(readBuffer), 40);
+bool KeyboardDevice::isPresent() const {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(m_ioMutex);
+        if (m_dryRun) return true;
+        if (!m_isConnected) return false;
+        path = m_devicePath;
+    }
+    for (const CandidateEndpoint& candidate : findAllCandidates()) {
+        if (candidate.path == path) return true;
+    }
+    return false;
+}
 
-    return (bytesRead > 0 && (readBuffer[0] == 0xA9 || readBuffer[1] == 0xA9));
+bool KeyboardDevice::hasJoystickCollection(const std::span<const std::pair<uint16_t, uint16_t>> usages) noexcept {
+    for (const auto& [page, usage] : usages) {
+        if (page == 0x01 && (usage == 0x04 || usage == 0x05)) return true; // Generic Desktop: Joystick / Game Pad
+    }
+    return false;
+}
+
+std::optional<bool> KeyboardDevice::enumeratedAsXInput() const {
+    uint16_t productId = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_ioMutex);
+        if (m_dryRun || !m_isConnected) return std::nullopt;
+        productId = m_productId;
+    }
+    std::vector<std::pair<uint16_t, uint16_t>> usages;
+    hid_device_info* devices = hid_enumerate(KEYCHRON_VID, productId);
+    for (const hid_device_info* current = devices; current != nullptr; current = current->next) {
+        usages.emplace_back(current->usage_page, current->usage);
+    }
+    hid_free_enumeration(devices);
+    if (usages.empty()) return std::nullopt;
+    return !hasJoystickCollection(usages);
 }
 
 // 6. Connect & Disconnect Lifecycle
 bool KeyboardDevice::connect() {
     std::lock_guard<std::mutex> lock(m_ioMutex);
-    if (m_isConnected) {
-        if (m_handle != nullptr) {
-            hid_close(m_handle);
-            m_handle = nullptr;
-        }
-        m_isConnected = false;
-        m_devicePath.clear();
-    }
-
-    auto candidates = findAllCandidates();
-    if (candidates.empty()) {
-        std::cerr << "[KeyboardDevice] No Keychron Raw HID (0xFF60:0x61) endpoints discovered.\n";
-        return false;
-    }
-
-    // Probe each candidate with the 0xA9 0x10 heartbeat
-    for (const auto& cand : candidates) {
-        hid_device* testHandle = hid_open_path(cand.path.c_str());
-        if (!testHandle) continue;
-
-        if (probeEndpoint(testHandle)) {
-            m_handle = testHandle;
-            m_devicePath = cand.path;
-            m_isConnected = true;
-            std::cout << "[KeyboardDevice] Connected successfully to: " << m_devicePath << '\n';
-            return true;
-        }
-
-        hid_close(testHandle);
-    }
-
-    // Fallback if keyboard is in low-power idle and didn't answer in 40ms
-    m_handle = hid_open_path(candidates[0].path.c_str());
     if (m_handle != nullptr) {
-        m_devicePath = candidates[0].path;
-        m_isConnected = true;
-        std::cout << "[KeyboardDevice] Fallback bound to: " << m_devicePath << '\n';
-        return true;
+        hid_close(m_handle);
+        m_handle = nullptr;
+    }
+    m_isConnected = false;
+    m_devicePath.clear();
+    m_productId = 0;
+
+    const auto candidates = findAllCandidates();
+    if (candidates.empty()) return false; // not plugged in (the watcher keeps looking quietly)
+
+    // Prefer an endpoint that answers; a keyboard that is still booting may not, so fall back to the first one.
+    const CandidateEndpoint* chosen = nullptr;
+    for (const auto& candidate : candidates) {
+        hid_device* handle = hid_open_path(candidate.path.c_str());
+        if (handle == nullptr) continue;
+        if (probeEndpoint(handle)) {
+            m_handle = handle;
+            chosen = &candidate;
+            break;
+        }
+        hid_close(handle);
+    }
+    if (m_handle == nullptr) {
+        m_handle = hid_open_path(candidates.front().path.c_str());
+        if (m_handle == nullptr) return false;
+        chosen = &candidates.front();
     }
 
-    return false;
+    m_devicePath  = chosen->path;
+    m_productId   = chosen->productId;
+    m_isConnected = true;
+    std::cout << "[KeyboardDevice] Connected to the K2 HE (USB PID 0x" << std::hex << std::setw(4) << std::setfill('0')
+              << m_productId << std::dec << "): " << m_devicePath << '\n';
+    return true;
 }
 
 void KeyboardDevice::disconnect() {
@@ -182,6 +228,7 @@ void KeyboardDevice::disconnect() {
         m_handle = nullptr;
     }
     m_devicePath.clear();
+    m_productId = 0;
     m_isConnected = false;
 }
 

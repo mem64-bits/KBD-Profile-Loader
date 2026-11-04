@@ -52,8 +52,26 @@ namespace ui {
         void cycleProfile(bool forward) override;
         void applyActuation(std::uint8_t slot, const ActuationSettings& settings, bool saveToFlash) override;
         void readActuation(std::uint8_t slot) override;
+        void applyKeyActuation(std::uint8_t slot, std::vector<KeyPosition> keys, const KeyActuation& value,
+                               bool saveToFlash) override;
         void flashSlot(std::uint8_t slot) override;
         void refresh() override;
+        void reorderLibrary(std::size_t fromIndex, std::size_t toIndex) override;
+        void assignProfileToSlot(const std::string& fileName, std::uint8_t targetSlot, bool writeNow) override;
+        void clearSlot(std::uint8_t slot) override;
+        void readSlotDetails(std::uint8_t slot) override;
+        void applyAdvancedKeys(std::uint8_t slot, std::vector<AdvancedKeyChange> changes, bool saveToFlash) override;
+        void applySocdPairs(std::uint8_t slot, std::vector<kbd::SocdPair> pairs, bool saveToFlash) override;
+        void readControllerSettings() override;
+        void applyControllerMode(std::uint8_t mode) override;
+        void setAutoControllerMode(bool enabled) override;
+        [[nodiscard]] bool autoControllerMode() const noexcept override;
+        void applyCurve(const kbd::ResponseCurve& curve) override;
+        void watchLiveTravel(std::vector<KeyPosition> keys) override;
+        [[nodiscard]] std::vector<LiveKeyTravel> liveTravel() const override;
+
+        // Live travel is polled this often while the window is open and keys are watched.
+        static constexpr std::chrono::milliseconds LIVE_POLL_INTERVAL{16};
 
         // --- Files::IFileObserver (called on the directory watcher thread) ---
         void onFileCreated(const std::filesystem::path& path) override;
@@ -74,11 +92,20 @@ namespace ui {
         void runBusy(const std::string& busyText, const std::function<void()>& body);
         void runCommand(const std::string& busyText, const std::function<CommandResult()>& command);
         void runApplyActuation(std::uint8_t slot, const ActuationSettings& settings, bool saveToFlash);
+        void runApplyKeyActuation(std::uint8_t slot, const std::vector<KeyPosition>& keys, const KeyActuation& value,
+                                  bool saveToFlash);
+        void saveIfRequested(std::uint8_t slot, bool saveToFlash, StatusSeverity& severity, std::string& message);
         void runReadActuation(std::uint8_t slot);
         void runFlashSlot(std::uint8_t slot);
 
         void refreshState(bool queryHardware);
         void pollActiveSlot();
+        // Automatic gamepad mode for the slot that just became active (worker thread).
+        void syncControllerMode(int activeSlot);
+        void pollLiveTravel();
+        void runApplyAdvancedKeys(std::uint8_t slot, const std::vector<AdvancedKeyChange>& changes, bool saveToFlash);
+        void runApplySocd(std::uint8_t slot, const std::vector<kbd::SocdPair>& pairs, bool saveToFlash);
+        void storeDetails(std::uint8_t slot);
         void beginBusy(const std::string& text);
         void endBusy(StatusSeverity severity, const std::string& text);
 
@@ -91,6 +118,16 @@ namespace ui {
         std::deque<Task>            m_tasks;
         bool                        m_stopped{false};
         std::atomic<bool>           m_polling{false};
+
+        mutable std::mutex          m_liveMutex;  // guards the two below
+        std::vector<KeyPosition>    m_liveKeys;
+        std::vector<LiveKeyTravel>  m_liveReadings;
+        std::atomic<bool>           m_liveWanted{false};
+        std::atomic<bool>           m_reschedule{false};
+        std::chrono::steady_clock::time_point m_lastSlotPoll{};
+        std::atomic<bool> m_autoControllerMode{true};
+        int m_lastSyncedSlot{-1};
+
         std::jthread                m_thread;
     };
 

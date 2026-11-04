@@ -128,6 +128,7 @@ TEST(AppStateTest, LabelsAreOneBased) {
     EXPECT_EQ(ui::slotLabel(0), "Slot 1");
     EXPECT_EQ(ui::slotLabel(2), "Slot 3");
     EXPECT_STREQ(ui::transportName(kbd::TransportMode::Wired), "Wired USB-C");
-    EXPECT_STREQ(ui::transportName(kbd::TransportMode::WirelessDongle), "2.4G dongle");
+    EXPECT_STREQ(ui::variantName(kbd::KeyboardVariant::Iso), "ISO");
+    EXPECT_STREQ(ui::variantName(kbd::KeyboardVariant::Unknown), "");
     EXPECT_STREQ(ui::transportName(kbd::TransportMode::Disconnected), "Disconnected");
 }

@@ -19,9 +19,9 @@ namespace {
         ui::AppSnapshot state;
         state.device = {true, kbd::TransportMode::Wired, "path"};
         state.activeSlot = activeSlot;
-        state.slots[0] = {true, "Default", "default.json", std::nullopt};
-        state.slots[1] = {true, "Tekken 8", "tekken.json", std::nullopt};
-        state.slots[2] = {false, "Slot 3", "", std::nullopt};
+        state.slots[0] = {true, "Default", "default.json", std::nullopt, std::nullopt};
+        state.slots[1] = {true, "Tekken 8", "tekken.json", std::nullopt, std::nullopt};
+        state.slots[2] = {false, "Slot 3", "", std::nullopt, std::nullopt};
         return state;
     }
 

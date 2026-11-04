@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/GamepadModel.h"
 #include "ui/IThemeObserver.h"
 #include "ui/IView.h"
 #include "ui/IWindowController.h"
@@ -13,8 +14,8 @@ namespace ui {
 
     struct UIManagerOptions {
         std::string windowTitle{"Keychron K2 HE - Profile Loader"};
-        int         width{480};
-        int         height{700};
+        int         width{1140}; // logical pixels (scaled by the display's DPI): sidebar + keyboard view
+        int         height{840};
         bool        startVisible{false};
         int         exitAfterFrames{0}; // > 0: stop after this many rendered frames (previews, smoke tests)
 
@@ -23,10 +24,11 @@ namespace ui {
         std::function<void(bool visible)> onVisibilityChanged; // the window was shown or hidden
     };
 
-    // Hosts the dashboard window: GLFW (Win32, X11 and Wayland) + OpenGL + Dear ImGui. The event loop runs
-    // on the thread that calls run() - the main thread, as GLFW requires - and sleeps until something
+    // Hosts the dashboard window: SDL3 (Win32, X11 and Wayland) + OpenGL + Dear ImGui. The event loop runs
+    // on the thread that calls run() - the main thread, as SDL requires - and sleeps until something
     // happens, so a hidden window costs no CPU. Closing the window only hides it (the daemon lives on in
-    // the tray). GLFW / ImGui types stay in the .cpp.
+    // the tray). It also owns SDL's game-controller input (gamepadSource()), which only listens while the
+    // window is shown. SDL / ImGui types stay in the .cpp.
     class UIManager final : public IWindowController, public IThemeObserver {
     public:
         explicit UIManager(UIManagerOptions options = {});
@@ -49,6 +51,10 @@ namespace ui {
 
         // Writes the current frame to a PNG. Only valid on the UI thread, from options.onFrameRendered.
         bool saveScreenshot(const std::filesystem::path& path);
+
+        // Game controllers seen through SDL3. Valid for the UIManager's lifetime; use it on the UI thread only
+        // (views do, from render()).
+        [[nodiscard]] std::shared_ptr<gamepad::IGamepadSource> gamepadSource() const;
 
         // --- IWindowController (thread-safe) ---
         void showDashboard() override;

@@ -7,6 +7,7 @@
 #include "files/AppPaths.h"
 #include "files/Logger.h"
 #include "ui/AppModel.h"
+#include "ui/DemoGamepadSource.h"
 #include "ui/DemoProfileGateway.h"
 #include "ui/ProfileController.h"
 #include "ui/ProfileServiceGateway.h"
@@ -16,10 +17,17 @@
 #include "ui/TrayPresenter.h"
 #include "ui/imgui/ActuationPanel.h"
 #include "ui/imgui/DashboardView.h"
+#include "ui/imgui/GamepadPanel.h"
+#include "ui/imgui/KeyboardPage.h"
+#include "ui/imgui/Workspace.h"
+#include "ui/imgui/MovementPanel.h"
 #include "ui/imgui/ProfilesPanel.h"
 #include "ui/imgui/SettingsPanel.h"
 #include "ui/imgui/UIManager.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <condition_variable>
 #include <memory>
@@ -76,7 +84,11 @@ static void printUsage() {
         "  --show               open the dashboard window at start-up (or in the running daemon)\n"
         "  --demo               run the UI against a simulated keyboard (no hardware needed)\n"
         "  --screenshot <file>  with --demo: render the dashboard to a PNG and exit\n"
-        "  --tab <name>         first tab to show: profiles, actuation or settings\n"
+        "  --tab <name>         first page to show: profiles, actuation, movement, gamepad, gamepad-mapping,\n"
+        "                       gamepad-curve or settings\n"
+        "  --slot <1-3>         with --demo: the slot the simulated keyboard starts on\n"
+        "  --labels <style>     controller button names: xbox or playstation (DualSense drawing)\n"
+        "  --size <WxH>         window size in logical pixels (e.g. 1140x1500 for a full-page screenshot)\n"
 #if !defined(_WIN32)
         "\n"
         "Commands for a running daemon (bind these to compositor / desktop shortcuts):\n"
@@ -98,6 +110,11 @@ int main(int argc, char* argv[]) {
     bool        demoMode = false;
     std::string screenshotPath;
     std::size_t firstTab = 0;
+    ui::GamepadPanel::View gamepadView = ui::GamepadPanel::View::Controller;
+    int         demoSlot = 0;
+    bool        playStationLabels = false;
+    int         windowWidth = 0;  // 0 = UIManagerOptions default
+    int         windowHeight = 0;
 
     // 2. Command-line argument overrides
     for (int i = 1; i < argc; ++i) {
@@ -116,7 +133,22 @@ int main(int argc, char* argv[]) {
             demoMode = true;
         } else if (arg == "--tab" && i + 1 < argc) {
             const std::string name = argv[++i];
-            firstTab = name == "actuation" ? 1 : name == "settings" ? 2 : 0;
+            firstTab = name == "actuation" ? 1 : name == "movement" ? 2 : name.rfind("gamepad", 0) == 0 ? 3 : name == "settings" ? 4 : 0;
+            // Pages: 0 Library, 1 Keyboard (tabs: actuation, movement, gamepad), 2 Settings
+            if (name == "gamepad-mapping") gamepadView = ui::GamepadPanel::View::Mapping;
+            if (name == "gamepad-curve") gamepadView = ui::GamepadPanel::View::Curve;
+        } else if (arg == "--slot" && i + 1 < argc) {
+            demoSlot = std::clamp(std::atoi(argv[++i]), 1, 3) - 1;
+        } else if (arg == "--labels" && i + 1 < argc) {
+            playStationLabels = std::string(argv[++i]) == "playstation";
+        } else if (arg == "--size" && i + 1 < argc) {
+            // WIDTHxHEIGHT in logical pixels, e.g. for full-page screenshots
+            const std::string size = argv[++i];
+            const auto x = size.find('x');
+            if (x != std::string::npos) {
+                windowWidth  = std::clamp(std::atoi(size.substr(0, x).c_str()), 640, 4000);
+                windowHeight = std::clamp(std::atoi(size.substr(x + 1).c_str()), 480, 4000);
+            }
         } else if (arg == "--show") {
             showWindow = true;
 #if !defined(_WIN32)
@@ -189,7 +221,7 @@ int main(int argc, char* argv[]) {
 
         if (demoMode) {
             LOG_INFO("Daemon", "Demo mode: using a simulated keyboard.");
-            gateway = std::make_unique<ui::DemoProfileGateway>();
+            gateway = std::make_unique<ui::DemoProfileGateway>(std::chrono::milliseconds(150), demoSlot);
         } else {
             keyboard = std::make_unique<kbd::KeyboardDevice>();
             if (!keyboard->connect()) {
@@ -235,10 +267,12 @@ int main(int argc, char* argv[]) {
         ui::UIManager* uiPointer = nullptr;
         ui::UIManagerOptions uiOptions;
         uiOptions.startVisible = showWindow || demoMode;
+        if (windowWidth > 0) uiOptions.width = windowWidth;
+        if (windowHeight > 0) uiOptions.height = windowHeight;
         uiOptions.onVisibilityChanged = [&controller](const bool visible) { controller.setPollingEnabled(visible); };
         bool screenshotSaved = false;
         if (!screenshotPath.empty()) {
-            uiOptions.exitAfterFrames = 14; // let the layout settle before taking the picture
+            uiOptions.exitAfterFrames = 48; // let the layout settle and the simulated keyboard answer before the picture
             uiOptions.onFrameRendered = [&](const int frame) {
                 if (frame == uiOptions.exitAfterFrames - 1 && uiPointer != nullptr) {
                     screenshotSaved = uiPointer->saveScreenshot(screenshotPath);
@@ -248,11 +282,25 @@ int main(int argc, char* argv[]) {
         ui::UIManager uiManager(uiOptions);
         uiPointer = &uiManager;
 
-        auto dashboard = std::make_shared<ui::DashboardView>(model);
+        // Game controllers: SDL3 through the window host, or a scripted pad for --demo.
+        std::shared_ptr<ui::gamepad::IGamepadSource> gamepads = demoMode ? std::make_shared<ui::DemoGamepadSource>()
+                                                                          : uiManager.gamepadSource();
+        auto workspace = std::make_shared<ui::Workspace>();
+        if (playStationLabels) workspace->labels = ui::gamepad::LabelStyle::PlayStation;
+        auto gamepadPanel = std::make_unique<ui::GamepadPanel>(controller, gamepads, workspace);
+        gamepadPanel->showView(gamepadView);
+
+        auto keyboardPage = std::make_unique<ui::KeyboardPage>();
+        keyboardPage->addTab(std::make_unique<ui::ActuationPanel>(controller, workspace));
+        keyboardPage->addTab(std::make_unique<ui::MovementPanel>(controller, workspace));
+        keyboardPage->addTab(std::move(gamepadPanel));
+        if (firstTab >= 1 && firstTab <= 3) keyboardPage->selectTab(firstTab - 1);
+
+        auto dashboard = std::make_shared<ui::DashboardView>(model, controller, workspace);
         dashboard->addPanel(std::make_unique<ui::ProfilesPanel>(controller, system));
-        dashboard->addPanel(std::make_unique<ui::ActuationPanel>(controller));
-        dashboard->addPanel(std::make_unique<ui::SettingsPanel>(system, themeFile));
-        dashboard->selectTab(firstTab);
+        dashboard->addPanel(std::move(keyboardPage));
+        dashboard->addPanel(std::make_unique<ui::SettingsPanel>(system, themeFile, workspace));
+        dashboard->selectTab(firstTab == 0 ? 0 : firstTab == 4 ? 2 : 1);
         uiManager.addView(dashboard);
 
         // 10. Shortcut Engine & Tray Integration

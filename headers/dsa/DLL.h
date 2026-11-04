@@ -215,6 +215,16 @@ public:
         }
     }
 
+    // Same walk, but the callback may modify the elements in place.
+    template <typename Callback>
+    void forEach(Callback&& func) {
+        Node<T>* curr = m_head;
+        while (curr != nullptr) {
+            func(curr->m_element);
+            curr = curr->m_next;
+        }
+    }
+
     // Direct cursor jump for slot-to-profile synchronization
     bool setCursorTo(const T& target) {
         Node<T>* curr = m_head;
@@ -258,6 +268,62 @@ public:
             m_cursor = m_cursor->m_previous;
         }
         return m_cursor->m_element;
+    }
+
+    // Moves the element at `fromIndex` so that it ends up at `toIndex` (both counted from the head).
+    // O(N) to find the nodes, O(1) to relink; no node is copied or freed, so the cursor stays valid.
+    // Returns false (and changes nothing) for out-of-range indices or fromIndex == toIndex.
+    bool moveElement(std::size_t fromIndex, std::size_t toIndex) {
+        if (fromIndex >= m_size || toIndex >= m_size || fromIndex == toIndex) return false;
+
+        // 1. Locate the source node
+        Node<T>* sourceNode = m_head;
+        for (std::size_t i = 0; i < fromIndex; ++i) {
+            sourceNode = sourceNode->m_next;
+        }
+
+        // 2. Unlink source node from its current position
+        if (sourceNode == m_head) {
+            m_head = sourceNode->m_next;
+            if (m_head) m_head->m_previous = nullptr;
+        } else if (sourceNode == m_tail) {
+            m_tail = sourceNode->m_previous;
+            if (m_tail) m_tail->m_next = nullptr;
+        } else {
+            sourceNode->m_previous->m_next = sourceNode->m_next;
+            sourceNode->m_next->m_previous = sourceNode->m_previous;
+        }
+
+        // 3. Locate target position
+        Node<T>* targetNode = m_head;
+        for (std::size_t i = 0; i < (toIndex > fromIndex ? toIndex - 1 : toIndex); ++i) {
+            targetNode = targetNode->m_next;
+        }
+
+        // 4. Relink source node into the new position
+        if (toIndex == 0) {
+            sourceNode->m_previous = nullptr;
+            sourceNode->m_next = m_head;
+            if (m_head) m_head->m_previous = sourceNode;
+            m_head = sourceNode;
+        } else if (toIndex >= m_size - 1) {
+            sourceNode->m_next = nullptr;
+            sourceNode->m_previous = m_tail;
+            if (m_tail) m_tail->m_next = sourceNode;
+            m_tail = sourceNode;
+        } else if (toIndex > fromIndex) {
+            sourceNode->m_next = targetNode->m_next;
+            sourceNode->m_previous = targetNode;
+            if (targetNode->m_next) targetNode->m_next->m_previous = sourceNode;
+            targetNode->m_next = sourceNode;
+        } else {
+            sourceNode->m_previous = targetNode->m_previous;
+            sourceNode->m_next = targetNode;
+            if (targetNode->m_previous) targetNode->m_previous->m_next = sourceNode;
+            targetNode->m_previous = sourceNode;
+        }
+
+        return true;
     }
 };
 

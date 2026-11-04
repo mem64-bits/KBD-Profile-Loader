@@ -39,47 +39,36 @@ void DeviceWatcher::stop() {
     }
 }
 
+// Wired only: every interval, check that the connected keyboard is still enumerated (no packets are sent, so
+// nothing interleaves with the controller's HID transactions), or try to open it when it is not connected.
 void DeviceWatcher::run(std::stop_token stopToken) {
+    m_wasConnected = m_device.isConnected(); // main() may have connected before the watcher started
+
     while (!stopToken.stop_requested()) {
         std::this_thread::sleep_for(m_interval);
         if (stopToken.stop_requested()) break;
 
-        // Check if current connection is still alive via a quick status check
-        bool currentlyConnected = m_device.isConnected();
-
-        if (currentlyConnected) {
-            auto ping = KeychronProtocol::createStatusQueryPacket();
-            if (!m_device.sendReport(ping)) {
-                // Pipe broke!
-                currentlyConnected = false;
-                m_device.disconnect();
-            }
+        if (m_device.isConnected()) {
+            if (m_device.isPresent()) continue;
+            m_device.disconnect();
+        } else if (m_device.connect()) {
+            const std::string path = m_device.getDevicePath();
+            m_wasConnected   = true;
+            m_lastActivePath = path;
+            std::lock_guard<std::mutex> lock(m_observerMutex);
+            m_observers.forEach([&path](IDeviceObserver* observer) {
+                if (observer) observer->onDeviceConnected(TransportMode::Wired, path);
+            });
+            continue;
         }
 
-        // If disconnected, attempt to probe and hot-swap to active transport
-        if (!currentlyConnected) {
-            if (m_device.connect()) {
-                std::string currentPath = m_device.getDevicePath();
-                m_wasConnected = true;
-                m_lastActivePath = currentPath;
-
-                TransportMode mode = (currentPath.find("0E21") != std::string::npos || currentPath.find("0e21") != std::string::npos)
-                                     ? TransportMode::Wired
-                                     : TransportMode::WirelessDongle;
-
-                std::lock_guard<std::mutex> lock(m_observerMutex);
-                m_observers.forEach([mode, &currentPath](IDeviceObserver* obs) {
-                    if (obs) obs->onDeviceConnected(mode, currentPath);
-                });
-            } else if (m_wasConnected) {
-                m_wasConnected = false;
-                m_lastActivePath.clear();
-
-                std::lock_guard<std::mutex> lock(m_observerMutex);
-                m_observers.forEach([](IDeviceObserver* obs) {
-                    if (obs) obs->onDeviceDisconnected();
-                });
-            }
+        if (m_wasConnected) {
+            m_wasConnected = false;
+            m_lastActivePath.clear();
+            std::lock_guard<std::mutex> lock(m_observerMutex);
+            m_observers.forEach([](IDeviceObserver* observer) {
+                if (observer) observer->onDeviceDisconnected();
+            });
         }
     }
 }

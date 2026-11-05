@@ -4,6 +4,7 @@
 #include "kbd/KeychronProtocol.h"
 #include "kbd/ProfileMemory.h"
 #include "ui/AppState.h"
+#include "ui/imgui/Workspace.h"
 #include "ui/ControllerMapping.h"
 #include "ui/KeyboardLayout.h"
 
@@ -245,4 +246,22 @@ TEST(DynamicKeystrokeTest, SlotDetailsDecodeAndHandOutFreeEntries) {
 
     EXPECT_EQ(details.okmcIndexFor({2, 2}), 0) << "W keeps its own entry";
     EXPECT_EQ(details.okmcIndexFor({2, 3}), 1) << "E gets the first unused one";
+}
+
+TEST(WorkspaceTest, DisplayChoicesSurviveSavingAndLoading) {
+    ui::Workspace saved;
+    saved.layout = ui::LayoutKind::Ansi;
+    saved.labels = ui::gamepad::LabelStyle::PlayStation;
+    saved.glyphs = ui::GlyphStyle::Zacksly;
+
+    ui::Workspace loaded;
+    loaded.loadDisplay(saved.saveDisplay());
+    EXPECT_EQ(loaded.layout, saved.layout);
+    EXPECT_EQ(loaded.labels, saved.labels);
+    EXPECT_EQ(loaded.glyphs, ui::GlyphStyle::Zacksly);
+
+    ui::Workspace defaults;
+    defaults.loadDisplay("prompts=nonsense\r\nlayout=auto\r\ngarbage line\r\n");
+    EXPECT_FALSE(defaults.layout.has_value());
+    EXPECT_EQ(defaults.glyphs, ui::GlyphStyle::Kenney) << "unknown values keep the default";
 }

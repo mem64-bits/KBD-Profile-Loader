@@ -5,6 +5,7 @@
 #include "ui/imgui/Workspace.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -14,7 +15,8 @@ namespace ui {
     // files, device details and an About section.
     class SettingsPanel final : public IPanel {
     public:
-        SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace);
+        SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace,
+                      std::function<void()> onDisplayChanged = {});
         ~SettingsPanel() override;
 
         SettingsPanel(const SettingsPanel&) = delete;
@@ -37,6 +39,7 @@ namespace ui {
         ISystemIntegration&   m_system;
         std::filesystem::path m_themeFile;
         std::shared_ptr<Workspace> m_workspace;
+        std::function<void()>      m_onDisplayChanged;
         std::string           m_themeMessage;
         bool                  m_autostart{false};
         double                m_lastAutostartCheck{-10.0};

@@ -29,6 +29,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <filesystem>
+#include <functional>
+#include <iterator>
+#include <fstream>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -88,6 +92,7 @@ static void printUsage() {
         "                       gamepad-curve or settings\n"
         "  --slot <1-3>         with --demo: the slot the simulated keyboard starts on\n"
         "  --labels <style>     controller button names: xbox or playstation (DualSense drawing)\n"
+        "  --prompts <set>      button prompts: kenney, zacksly or text\n"
         "  --size <WxH>         window size in logical pixels (e.g. 1140x1500 for a full-page screenshot)\n"
 #if !defined(_WIN32)
         "\n"
@@ -113,6 +118,7 @@ int main(int argc, char* argv[]) {
     ui::GamepadPanel::View gamepadView = ui::GamepadPanel::View::Controller;
     int         demoSlot = 0;
     bool        playStationLabels = false;
+    std::string promptSet;
     int         windowWidth = 0;  // 0 = UIManagerOptions default
     int         windowHeight = 0;
 
@@ -139,6 +145,8 @@ int main(int argc, char* argv[]) {
             if (name == "gamepad-curve") gamepadView = ui::GamepadPanel::View::Curve;
         } else if (arg == "--slot" && i + 1 < argc) {
             demoSlot = std::clamp(std::atoi(argv[++i]), 1, 3) - 1;
+        } else if (arg == "--prompts" && i + 1 < argc) {
+            promptSet = argv[++i];
         } else if (arg == "--labels" && i + 1 < argc) {
             playStationLabels = std::string(argv[++i]) == "playstation";
         } else if (arg == "--size" && i + 1 < argc) {
@@ -286,7 +294,18 @@ int main(int argc, char* argv[]) {
         std::shared_ptr<ui::gamepad::IGamepadSource> gamepads = demoMode ? std::make_shared<ui::DemoGamepadSource>()
                                                                           : uiManager.gamepadSource();
         auto workspace = std::make_shared<ui::Workspace>();
+        // Display choices (keyboard drawing, button names, prompt style) live in ui.ini next to config.ini.
+        const std::filesystem::path uiFile = Files::AppPaths::getConfigFilePath().parent_path() / "ui.ini";
+        if (std::ifstream in(uiFile); in) {
+            workspace->loadDisplay(std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()));
+        }
+        const auto saveDisplay = [workspace, uiFile] {
+            std::ofstream out(uiFile, std::ios::trunc);
+            if (out) out << workspace->saveDisplay();
+            if (!out) LOG_WARN("Config", "Could not write " + uiFile.string());
+        };
         if (playStationLabels) workspace->labels = ui::gamepad::LabelStyle::PlayStation;
+        if (!promptSet.empty()) workspace->loadDisplay("prompts=" + (promptSet == "text" ? std::string("text") : promptSet));
         auto gamepadPanel = std::make_unique<ui::GamepadPanel>(controller, gamepads, workspace);
         gamepadPanel->showView(gamepadView);
 
@@ -299,7 +318,7 @@ int main(int argc, char* argv[]) {
         auto dashboard = std::make_shared<ui::DashboardView>(model, controller, workspace);
         dashboard->addPanel(std::make_unique<ui::ProfilesPanel>(controller, system));
         dashboard->addPanel(std::move(keyboardPage));
-        dashboard->addPanel(std::make_unique<ui::SettingsPanel>(system, themeFile, workspace));
+        dashboard->addPanel(std::make_unique<ui::SettingsPanel>(system, themeFile, workspace, demoMode ? std::function<void()>{} : std::function<void()>(saveDisplay)));
         dashboard->selectTab(firstTab == 0 ? 0 : firstTab == 4 ? 2 : 1);
         uiManager.addView(dashboard);
 

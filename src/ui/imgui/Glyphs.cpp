@@ -116,6 +116,7 @@ bool drawTarget(ImDrawList* draw, const std::uint8_t target, const gamepad::Labe
                                                           IM_COL32(222, 110, 190, 255), IM_COL32(64, 200, 160, 255)};
         const auto i = static_cast<std::size_t>(column);
         colour = !zacksly ? IM_COL32_WHITE : playStation ? PLAYSTATION[i] : XBOX[i];
+        colour = (colour & ~IM_COL32_A_MASK) | (tint & IM_COL32_A_MASK); // the tint's alpha still fades them
     }
     const GLuint texture = zacksly ? g_zacksly.texture : g_kenney.texture;
     draw->AddImage(ImTextureRef(static_cast<ImTextureID>(texture)), ImVec2(centre.x - h, centre.y - h),

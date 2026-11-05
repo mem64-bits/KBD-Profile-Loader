@@ -3,6 +3,9 @@
 #endif
 
 #include "ui/imgui/SettingsPanel.h"
+#include "kbd/GameController.h"
+#include "ui/ControllerMapping.h"
+#include "ui/imgui/Glyphs.h"
 #include "ui/ThemeManager.h"
 #include "ui/imgui/ImGuiTheme.h"
 #include "ui/imgui/Widgets.h"
@@ -41,8 +44,10 @@ namespace {
 
 } // namespace
 
-SettingsPanel::SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace)
-    : m_system(system), m_themeFile(std::move(themeFile)), m_workspace(workspace ? std::move(workspace) : std::make_shared<Workspace>())
+SettingsPanel::SettingsPanel(ISystemIntegration& system, std::filesystem::path themeFile, std::shared_ptr<Workspace> workspace,
+                             std::function<void()> onDisplayChanged)
+    : m_system(system), m_themeFile(std::move(themeFile)), m_workspace(workspace ? std::move(workspace) : std::make_shared<Workspace>()),
+      m_onDisplayChanged(std::move(onDisplayChanged))
 {}
 
 SettingsPanel::~SettingsPanel() = default;
@@ -142,6 +147,7 @@ void SettingsPanel::drawThemeSection(const Theme& theme) {
 
 void SettingsPanel::drawControllerSection(const AppSnapshot& state, const ThemePalette& palette) {
     widgets::sectionLabel("KEYBOARD AND CONTROLLER", palette);
+    const std::string before = m_workspace->saveDisplay();
 
     {
         const char* labels[] = {"Auto", "ANSI", "ISO"};
@@ -161,21 +167,50 @@ void SettingsPanel::drawControllerSection(const AppSnapshot& state, const ThemeP
     {
         const char* labels[] = {"Xbox", "PlayStation"};
         const int selected = m_workspace->labelStyle() == gamepad::LabelStyle::PlayStation ? 1 : 0;
-        ImGui::TextUnformatted("Controller button names");
+        ImGui::TextUnformatted("Controller buttons and drawing");
         const int picked = widgets::segmented("##labels", labels, selected, palette);
         if (picked == 0) m_workspace->labels = gamepad::LabelStyle::Xbox;
         if (picked == 1) m_workspace->labels = gamepad::LabelStyle::PlayStation;
-        mutedWrapped(palette, "The keyboard always reports an Xbox 360 controller to Windows; this only changes how "
-                              "buttons are named and drawn in this app (PlayStation also switches to a DualSense drawing).");
+        mutedWrapped(palette, "Names the buttons and picks the controller drawing (Xbox Series or DualSense). The keyboard "
+                              "always reports an Xbox 360 controller to Windows; this only changes the app.");
     }
     ImGui::Spacing();
     {
         const char* labels[] = {"Kenney", "Zacksly", "Text"};
         const int selected = static_cast<int>(m_workspace->glyphs);
-        ImGui::TextUnformatted("Button prompts on mapped keys");
+        ImGui::TextUnformatted("Button prompts");
         const int picked = widgets::segmented("##glyphs", labels, selected, palette);
         if (picked >= 0) m_workspace->glyphs = static_cast<GlyphStyle>(picked);
+
+        // Live preview of the chosen set, so a click visibly changes something here.
+        const float size = ImGui::GetFrameHeight() * 1.25f;
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        namespace GT = kbd::GamepadTarget;
+        const std::uint8_t sample[] = {GT::button(0), GT::button(1), GT::button(2), GT::button(3), GT::button(4), GT::button(5),
+                                       GT::LEFT_TRIGGER, GT::RIGHT_TRIGGER, GT::button(10), GT::button(12), GT::LEFT_STICK_UP,
+                                       GT::RIGHT_STICK_RIGHT, GT::button(6), GT::button(7)};
+        float x = at.x;
+        for (const std::uint8_t target : sample) {
+            const ImVec2 c(x + size * 0.5f, at.y + size * 0.55f);
+            if (m_workspace->glyphs == GlyphStyle::Drawn ||
+                !glyphs::drawTarget(draw, target, m_workspace->labelStyle(), c, size, toImU32(palette.text),
+                                    m_workspace->glyphs == GlyphStyle::Zacksly ? glyphs::Pack::Zacksly : glyphs::Pack::Kenney)) {
+                const std::string name = mapping::targetName(target, m_workspace->labelStyle());
+                const char* text = name.c_str();
+                const ImVec2 ts = ImGui::CalcTextSize(text);
+                const float w = std::max(size, ts.x + size * 0.4f);
+                draw->AddRectFilled(ImVec2(c.x - size * 0.45f, c.y - size * 0.35f), ImVec2(c.x - size * 0.45f + w, c.y + size * 0.35f),
+                                    toImU32(palette.surfaceRaised), size * 0.2f);
+                draw->AddText(ImVec2(c.x - size * 0.45f + (w - ts.x) * 0.5f, c.y - ts.y * 0.5f), toImU32(palette.text), text);
+                x += w - size;
+            }
+            x += size + size * 0.15f;
+        }
+        ImGui::Dummy(ImVec2(x - at.x, size * 1.1f));
+        mutedWrapped(palette, "Shown on mapped keys, in the controller pick list and in the input history.");
     }
+    if (m_workspace->saveDisplay() != before && m_onDisplayChanged) m_onDisplayChanged();
     ImGui::Spacing();
     if (ImGui::CollapsingHeader("Artwork credits")) {
         mutedWrapped(palette, "Controller drawing: the \"xbox-controller\" preset from input-overlay by Saikel Orado Liu, "

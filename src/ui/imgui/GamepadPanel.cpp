@@ -3,6 +3,7 @@
 #endif
 
 #include "ui/imgui/GamepadPanel.h"
+#include "ui/imgui/Glyphs.h"
 #include "ui/ControllerMapping.h"
 #include "ui/imgui/ImGuiTheme.h"
 #include "ui/imgui/Plots.h"
@@ -138,6 +139,17 @@ namespace {
             case art::Part::DpadRight: return 6;
             case art::Part::A: case art::Part::B: case art::Part::X: case art::Part::Y: return 0;
             default: return 8;
+        }
+    }
+
+    // The controller target of a face button (A B X Y in XInput order).
+    std::optional<std::uint8_t> faceTarget(const gamepad::Button button) {
+        switch (button) {
+            case gamepad::Button::South: return GT::button(0);
+            case gamepad::Button::East: return GT::button(1);
+            case gamepad::Button::West: return GT::button(2);
+            case gamepad::Button::North: return GT::button(3);
+            default: return std::nullopt;
         }
     }
 
@@ -831,6 +843,16 @@ void GamepadPanel::drawHistory(const float width, const float height, const Fram
             const Color fill = fresh ? groupColor(TargetGroup::FaceButtons, p).mix(p.surface, 0.15f) : p.surfaceRaised.lighten(0.08f);
             const Color text = fresh ? p.background : p.text;
             const auto face = faceButtonOf(attack);
+            if (face && m_notation == gamepad::Notation::PadLabels && m_workspace->glyphs != GlyphStyle::Drawn) {
+                const auto target = faceTarget(*face);
+                const float s = row * 0.8f;
+                if (target && glyphs::drawTarget(draw, *target, style, ImVec2(x + s * 0.5f, at.y + row * 0.45f), s,
+                                                 fresh ? IM_COL32_WHITE : IM_COL32(255, 255, 255, 120),
+                                                 m_workspace->glyphs == GlyphStyle::Zacksly ? glyphs::Pack::Zacksly : glyphs::Pack::Kenney)) {
+                    x += s + em * 0.3f;
+                    continue;
+                }
+            }
             if (face && m_notation == gamepad::Notation::PadLabels && style == LabelStyle::PlayStation) {
                 const float r = row * 0.34f;
                 widgets::drawFaceButton(draw, *face, style, ImVec2(x + r, at.y + row * 0.45f), r, toImU32(fill), toImU32(text));
@@ -1082,6 +1104,8 @@ void GamepadPanel::drawPalette(const Frame& f, const ThemePalette& p) {
     const TargetGroup order[] = {TargetGroup::LeftStick, TargetGroup::RightStick, TargetGroup::Dpad, TargetGroup::Triggers,
                                  TargetGroup::FaceButtons, TargetGroup::Shoulders, TargetGroup::Menu, TargetGroup::StickClicks};
     const float labelWidth = em * 7.0f;
+    const float rowStart = ImGui::GetCursorScreenPos().x;
+    const float rowEnd = rowStart + width - em * 0.5f;
     for (const TargetGroup group : order) {
         ImGui::PushID(static_cast<int>(group));
         ImGui::AlignTextToFramePadding();
@@ -1095,15 +1119,37 @@ void GamepadPanel::drawPalette(const Frame& f, const ThemePalette& p) {
         bool first = true;
         for (const mapping::TargetInfo& info : mapping::targets()) {
             if (info.group != group) continue;
-            if (!first) ImGui::SameLine(0.0f, em * 0.25f);
-            first = false;
             std::string label;
             if (group == TargetGroup::LeftStick || group == TargetGroup::RightStick || group == TargetGroup::Dpad) {
                 label = info.glyph == KeyGlyph::ArrowUp ? "Up" : info.glyph == KeyGlyph::ArrowDown ? "Down" : info.glyph == KeyGlyph::ArrowLeft ? "Left" : "Right";
             } else {
                 label = mapping::targetName(info.target, style);
             }
-            if (widgets::secondaryButton((label + "##" + std::to_string(info.target)).c_str(), ImVec2(0, 0), p)) assign(f, info.target);
+            // With a prompt set chosen, the button carries the prompt glyph in front of its name.
+            const bool prompt = m_workspace->glyphs != GlyphStyle::Drawn && glyphs::hasGlyph(info.target);
+            const float icon = ImGui::GetFrameHeight();
+            // Most prompts say it all (arrows, letters, shapes, LB / LT): those buttons are the glyph alone, named in
+            // the tooltip. Menu buttons and stick clicks keep their names, their icons alone are ambiguous.
+            const bool iconOnly = prompt && group != TargetGroup::Menu && group != TargetGroup::StickClicks;
+            const std::string text = iconOnly ? "     ##" + std::to_string(info.target)
+                                              : (prompt ? std::string("     ") : std::string()) + label + "##" + std::to_string(info.target);
+            // Next to the previous button, or on a new line under it when the row is full.
+            if (!first) {
+                ImGui::SameLine(0.0f, em * 0.25f);
+                if (ImGui::GetCursorScreenPos().x + widgets::buttonWidth(text.c_str()) > rowEnd) {
+                    ImGui::NewLine();
+                    ImGui::SetCursorScreenPos(ImVec2(rowStart + labelWidth, ImGui::GetCursorScreenPos().y));
+                }
+            }
+            first = false;
+            if (widgets::secondaryButton(text.c_str(), ImVec2(0, 0), p)) assign(f, info.target);
+            if (prompt) {
+                const ImVec2 min = ImGui::GetItemRectMin();
+                const float cx = iconOnly ? (min.x + ImGui::GetItemRectMax().x) * 0.5f : min.x + icon * 0.62f;
+                glyphs::drawTarget(ImGui::GetWindowDrawList(), info.target, style, ImVec2(cx, min.y + icon * 0.5f), icon * 0.92f,
+                                   toImU32(m_selection.empty() ? p.textMuted : p.text),
+                                   m_workspace->glyphs == GlyphStyle::Zacksly ? glyphs::Pack::Zacksly : glyphs::Pack::Kenney);
+            }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", mapping::targetName(info.target, style).c_str());
         }
         ImGui::PopID();
@@ -1125,15 +1171,14 @@ void GamepadPanel::drawPalette(const Frame& f, const ThemePalette& p) {
 
     ImGui::Spacing();
     widgets::sectionLabel("Presets (only change the keys they list)", p);
-    const float rowStart = ImGui::GetCursorScreenPos().x;
-    const float rowEnd = rowStart + width;
+    const float presetsEnd = ImGui::GetCursorScreenPos().x + width;
     bool first = true;
     for (const mapping::Preset& preset : mapping::presets()) {
         ImGui::PushID(preset.name);
         // Wrap to a new line instead of running past the card.
         if (!first) {
             ImGui::SameLine();
-            if (ImGui::GetCursorScreenPos().x + widgets::buttonWidth(preset.name) > rowEnd) ImGui::NewLine();
+            if (ImGui::GetCursorScreenPos().x + widgets::buttonWidth(preset.name) > presetsEnd) ImGui::NewLine();
         }
         first = false;
         if (widgets::secondaryButton(preset.name, ImVec2(0, 0), p)) {

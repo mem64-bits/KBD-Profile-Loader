@@ -133,6 +133,7 @@ KBD_Profile_Loader [--debug | --silent] [--show] [--demo] [--screenshot <file.pn
   --tab <name>         first page: profiles, actuation, movement, gamepad, gamepad-mapping, gamepad-curve, settings
   --slot <1-3>         with --demo: the slot the simulated keyboard starts on
   --labels <style>     xbox or playstation button names (playstation also shows the DualSense drawing)
+  --prompts <set>      kenney, zacksly or text button prompts (saved choices live in ui.ini next to config.ini)
   --size <WxH>         window size in logical pixels
 ```
 
